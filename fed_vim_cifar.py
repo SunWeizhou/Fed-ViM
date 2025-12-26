@@ -229,10 +229,12 @@ class Server:
             # 加上微小噪声防止数值不稳定
             Cov += torch.eye(self.feature_dim).to(self.device) * 1e-6
             vals, vecs = torch.linalg.eigh(Cov)
-            # 使用固定维度 20（约 16%），而不是 33%
-            k = 20  # 固定维度，更严格的子空间约束
+
+            # 【修改点 A】将 k 设置为 8 (仅保留 ~6% 的核心特征)
+            # 原来是 20，对于 SimpleCNN 来说还是太宽了
+            k = 8  # 极度压缩子空间，拒 OOD 于门外
             self.P_global = vecs[:, -k:]
-            print(f"[Server] Subspace dimension: {k}/{self.feature_dim}")
+            print(f"[Server] Subspace dimension: {k}/{self.feature_dim} ({100*k/self.feature_dim:.1f}%)")
         except Exception as e:
             print(f"PCA Error: {e}")
 
@@ -458,9 +460,11 @@ def main():
         round_accuracies = []
 
         for i, client in enumerate(clients):
+            # 【修改点 B】将 lambda_gsa 提升至 1.0 (原 0.5)
+            # 十倍强力约束，压扁 ID 特征到极窄子空间
             w, s, v_s, epoch_losses, accuracy = client.local_train(
                 server.model.state_dict(), global_stats,
-                {'local_epochs': local_epochs, 'feature_dim': 128, 'lambda_gsa': 0.1}
+                {'local_epochs': local_epochs, 'feature_dim': 128, 'lambda_gsa': 1.0}
             )
 
             # 打印该 client 的训练信息
@@ -485,6 +489,11 @@ def main():
         test_acc = compute_accuracy(server.model, test_loader, device)
         print(f"  Test Accuracy: {test_acc:.2f}%")
 
+        # 记录轮次信息（在早停检查之前记录，确保数据一致性）
+        history['round'].append(r + 1)
+        history['test_accuracy'].append(test_acc)
+        history['alpha'].append(server.alpha)
+
         # 早停检查
         if test_acc > best_test_acc:
             best_test_acc = test_acc
@@ -504,11 +513,6 @@ def main():
             # 恢复最佳模型
             server.model.load_state_dict(best_model_state)
             break
-
-        # 记录轮次信息
-        history['round'].append(r + 1)
-        history['test_accuracy'].append(test_acc)
-        history['alpha'].append(server.alpha)
 
         sys.stdout.flush()
 
