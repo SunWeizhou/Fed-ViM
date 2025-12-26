@@ -129,7 +129,15 @@ class GSALoss(nn.Module):
 class Client:
     def __init__(self, client_id, train_set, idxs, device='cpu'):
         self.id = client_id
-        self.loader = DataLoader(Subset(train_set, idxs), batch_size=64, shuffle=True)
+        # 【优化 1】增大 batch size 到 128，提高 GPU 利用率
+        # 【优化 2】num_workers=4 多进程预加载数据
+        self.loader = DataLoader(
+            Subset(train_set, idxs),
+            batch_size=128,  # 64 → 128 (ResNet-18 可以轻松处理)
+            shuffle=True,
+            num_workers=4,   # 多进程数据加载，减少 GPU 等待
+            pin_memory=True  # 锁页内存，加速 CPU→GPU 传输
+        )
         self.data_size = len(idxs)
         self.device = device
 
@@ -425,7 +433,8 @@ def main():
     client_sizes = [c.data_size for c in clients]
 
     # 准备 DataLoader (Test & OOD)
-    test_loader = DataLoader(test_data, batch_size=64)
+    # 【优化】增大评估 batch size，加速评估
+    test_loader = DataLoader(test_data, batch_size=128, num_workers=4, pin_memory=True)
 
     # 准备真实 OOD 数据 (SVHN)
     print("Loading SVHN (OOD)...")
@@ -442,7 +451,8 @@ def main():
     # 为了快速测试，只取前 2000 张
     ood_subset = Subset(ood_data, list(range(2000)))
     # SVHN 的 label 对我们不重要，统一定义为 0 (OOD)
-    ood_loader = DataLoader([(x, 0) for x, _ in ood_subset], batch_size=64)
+    # 【优化】增大 OOD batch size
+    ood_loader = DataLoader([(x, 0) for x, _ in ood_subset], batch_size=128, num_workers=4, pin_memory=True)
 
     # 2. 初始化服务端
     print("Initializing server...")
@@ -452,7 +462,8 @@ def main():
 
     # 3. 联邦训练循环
     rounds = 50  # 增加到 50 轮
-    local_epochs = 3  # 每轮本地训练 3 个 epoch
+    local_epochs = 5  # 每轮本地训练 5 个 epoch（充分利用 GPU）
+                       # ResNet-18 + batch_size=128 可以快速训练
 
     # 早停机制参数
     patience = 10  # 如果测试准确率连续 10 轮没有提升，则停止训练
