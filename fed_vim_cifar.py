@@ -66,7 +66,7 @@ def dirichlet_partition(dataset, num_clients, alpha=0.5, seed=42):
 
 # 1. 网络结构 (稍微加强版 SimpleCNN)
 class SimpleCNN(nn.Module):
-    def __init__(self, num_classes=10, feature_dim=128): # 增加维度以便观察
+    def __init__(self, num_classes=10, feature_dim=128, dropout_rate=0.2): # 增加 dropout
         super(SimpleCNN, self).__init__()
         self.encoder = nn.Sequential(
             nn.Conv2d(3, 32, 3, padding=1),
@@ -77,7 +77,8 @@ class SimpleCNN(nn.Module):
             nn.MaxPool2d(2), # 8x8
             nn.Flatten(),
             nn.Linear(64 * 8 * 8, feature_dim),
-            nn.ReLU()
+            nn.ReLU(),
+            nn.Dropout(dropout_rate)  # 添加 dropout
         )
         self.head = nn.Linear(feature_dim, num_classes)
         self.feature_dim = feature_dim
@@ -112,7 +113,8 @@ class Client:
     def local_train(self, global_weights, global_stats, args):
         model = SimpleCNN(feature_dim=args['feature_dim']).to(self.device)
         model.load_state_dict(global_weights)
-        optimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
+        # 添加 weight decay (L2 正则化)
+        optimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.9, weight_decay=5e-4)
         criterion_ce = nn.CrossEntropyLoss()
         criterion_gsa = GSALoss()
 
@@ -373,6 +375,8 @@ def main():
     cifar_std = (0.2023, 0.1994, 0.2010)
 
     transform_train = transforms.Compose([
+        transforms.RandomCrop(32, padding=4),  # 数据增强：随机裁剪
+        transforms.RandomHorizontalFlip(),     # 数据增强：随机水平翻转
         transforms.ToTensor(),
         transforms.Normalize(cifar_mean, cifar_std),
     ])
@@ -424,6 +428,11 @@ def main():
     rounds = 50  # 增加到 50 轮
     local_epochs = 3  # 每轮本地训练 3 个 epoch
 
+    # 早停机制参数
+    patience = 10  # 如果测试准确率连续 10 轮没有提升，则停止训练
+    best_test_acc = 0
+    rounds_no_improve = 0
+
     # 用于记录训练历史
     history = {
         'round': [],
@@ -435,6 +444,7 @@ def main():
 
     print(f"\n{'='*50}")
     print(f"Starting Training: {rounds} rounds, {local_epochs} local epochs each")
+    print(f"Early Stopping: patience={patience} rounds")
     print(f"{'='*50}")
     sys.stdout.flush()
 
@@ -474,6 +484,26 @@ def main():
         # 计算全局测试准确率
         test_acc = compute_accuracy(server.model, test_loader, device)
         print(f"  Test Accuracy: {test_acc:.2f}%")
+
+        # 早停检查
+        if test_acc > best_test_acc:
+            best_test_acc = test_acc
+            rounds_no_improve = 0
+            print(f"  ✓ New best test accuracy! Saving model...")
+            # 保存最佳模型
+            best_model_state = copy.deepcopy(server.model.state_dict())
+        else:
+            rounds_no_improve += 1
+            print(f"  No improvement for {rounds_no_improve} round(s) (best: {best_test_acc:.2f}%)")
+
+        if rounds_no_improve >= patience:
+            print(f"\n{'='*50}")
+            print(f"Early stopping triggered after {r+1} rounds!")
+            print(f"Best test accuracy: {best_test_acc:.2f}%")
+            print(f"{'='*50}")
+            # 恢复最佳模型
+            server.model.load_state_dict(best_model_state)
+            break
 
         # 记录轮次信息
         history['round'].append(r + 1)
