@@ -60,8 +60,9 @@ python fed_vim_cifar.py
 - 分布分离度: 极高
 
 ### SVHN 真实 OOD
-- AUROC: 待更新
-- 预期范围: 0.80-0.90
+- AUROC: 更新中（使用真实 SVHN 数据集）
+- 分布分离度: 优于随机基线
+- 结果图: `fed_vim_result_svhn.png`
 
 ## 项目结构
 

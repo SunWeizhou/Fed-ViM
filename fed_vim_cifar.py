@@ -5,10 +5,16 @@ import torch.nn.functional as F
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader, Subset
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')  # 必须在 pyplot 之前设置
 import matplotlib.pyplot as plt
 from sklearn.metrics import roc_auc_score
 import copy
 import os
+import sys
+
+# 设置国内镜像源加速下载（清华源）
+os.environ['HF_ENDPOINT'] = 'https://mirrors.tuna.tsinghua.edu.cn/hugging-face'
 
 # ==========================================
 # Part A: Non-IID 数据划分 (Data Engine)
@@ -293,13 +299,23 @@ def evaluate_and_plot(server, test_loader, ood_loader, device):
 # ==========================================
 
 def main():
+    import sys
+    print("=" * 50)
+    print("Fed-ViM Starting...")
+    print("=" * 50)
+    sys.stdout.flush()
+
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Using device: {device}")
+    sys.stdout.flush()
 
     # 1. 准备数据
-    print("Downloading CIFAR-10...")
+    print("Loading CIFAR-10...")
+    sys.stdout.flush()
     train_data = datasets.CIFAR10('./data', train=True, download=True, transform=transforms.ToTensor())
     test_data = datasets.CIFAR10('./data', train=False, download=True, transform=transforms.ToTensor())
+    print(f"CIFAR-10 loaded: Train={len(train_data)}, Test={len(test_data)}")
+    sys.stdout.flush()
 
     # Non-IID 划分
     client_indices = dirichlet_partition(train_data, num_clients=5, alpha=0.5)
@@ -312,12 +328,15 @@ def main():
     test_loader = DataLoader(test_data, batch_size=64)
 
     # 准备真实 OOD 数据 (SVHN)
-    print("Downloading SVHN (OOD)...")
+    print("Loading SVHN (OOD)...")
+    sys.stdout.flush()
     svhn_transform = transforms.Compose([
         transforms.Resize((32, 32)),
         transforms.ToTensor(),
     ])
     ood_data = datasets.SVHN(root='./data', split='test', download=True, transform=svhn_transform)
+    print(f"SVHN loaded: {len(ood_data)} samples")
+    sys.stdout.flush()
 
     # 为了快速测试，只取前 2000 张
     ood_subset = Subset(ood_data, list(range(2000)))
@@ -325,11 +344,17 @@ def main():
     ood_loader = DataLoader([(x, 0) for x, _ in ood_subset], batch_size=64)
 
     # 2. 初始化服务端
+    print("Initializing server...")
+    sys.stdout.flush()
     server = Server(feature_dim=128, device=device)
     global_stats = {'P': None, 'mu': None}
 
     # 3. 联邦训练循环
     rounds = 10 # 建议跑 10-20 轮看效果
+    print(f"\n{'='*50}")
+    print(f"Starting Training: {rounds} rounds")
+    print(f"{'='*50}")
+    sys.stdout.flush()
     for r in range(rounds):
         print(f"\n--- Round {r+1}/{rounds} ---")
 

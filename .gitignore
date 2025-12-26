@@ -1,7 +1,16 @@
-.git
-data
-*.log
-.ipynb_checkpoints
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.log
+
+# Data
+data/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
 .claude/
+.vscode/
+.idea/
