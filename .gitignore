@@ -1,0 +1,7 @@
+.git
+data
+*.log
+.ipynb_checkpoints
+__pycache__/
+*.pyc
+.claude/
