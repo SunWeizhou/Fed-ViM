@@ -262,9 +262,9 @@ class Server:
             Cov += torch.eye(self.feature_dim).to(self.device) * 1e-6
             vals, vecs = torch.linalg.eigh(Cov)
 
-            # 【ResNet-18 参数】512 维特征，k=64 约 12.5%
-            # ResNet 学习能力强，不需要极端压缩
-            k = 64  # 推荐值: 64-100 (12.5%-19.5%)
+            # 【最终优化】k=32 (6.25%): 更严格的子空间，把 SVHN 挤出去！
+            # ResNet-18 表达力强，6.25% 的子空间足够表示 ID 数据
+            k = 32  # 64 → 32 (更严格，增强 OOD 检测)
             self.P_global = vecs[:, -k:]
             print(f"[Server] Subspace dimension: {k}/{self.feature_dim} ({100*k/self.feature_dim:.1f}%)")
         except Exception as e:
@@ -495,11 +495,11 @@ def main():
         round_accuracies = []
 
         for i, client in enumerate(clients):
-            # 【ResNet-18 参数】lambda_gsa 回调至 0.1
-            # ResNet 学习能力强，轻微约束即可
+            # 【最终优化】lambda_gsa=1.0: 加大权重，强迫 ID 残差变小
+            # ResNet-18 学习能力 + 强约束 = ID 特征紧密聚集在子空间内
             w, s, v_s, epoch_losses, accuracy = client.local_train(
                 server.model.state_dict(), global_stats,
-                {'local_epochs': local_epochs, 'feature_dim': 512, 'lambda_gsa': 0.1}
+                {'local_epochs': local_epochs, 'feature_dim': 512, 'lambda_gsa': 1.0}
             )
 
             # 打印该 client 的训练信息
