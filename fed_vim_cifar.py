@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 from torchvision import datasets, transforms
+from torchvision.models import resnet18
 from torch.utils.data import DataLoader, Subset
 import numpy as np
 import matplotlib
@@ -64,28 +65,50 @@ def dirichlet_partition(dataset, num_clients, alpha=0.5, seed=42):
 # Part C: 核心架构 (Core Framework)
 # ==========================================
 
-# 1. 网络结构 (稍微加强版 SimpleCNN)
-class SimpleCNN(nn.Module):
-    def __init__(self, num_classes=10, feature_dim=128, dropout_rate=0.2): # 增加 dropout
-        super(SimpleCNN, self).__init__()
-        self.encoder = nn.Sequential(
-            nn.Conv2d(3, 32, 3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2), # 16x16
-            nn.Conv2d(32, 64, 3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2), # 8x8
-            nn.Flatten(),
-            nn.Linear(64 * 8 * 8, feature_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout_rate)  # 添加 dropout
-        )
-        self.head = nn.Linear(feature_dim, num_classes)
+# 1. 网络结构 (ResNet-18 for CIFAR-10)
+class ResNet18_CIFAR(nn.Module):
+    """
+    ResNet-18 适配版，专为 CIFAR-10 (32x32) 设计
+    - 替换 7x7 conv1 为 3x3
+    - 移除第一个 maxpool
+    - 特征维度: 512
+    """
+    def __init__(self, num_classes=10, feature_dim=512):
+        super(ResNet18_CIFAR, self).__init__()
+        # 加载标准 ResNet18，不预训练 (从头学 Non-IID)
+        self.backbone = resnet18(pretrained=False)
+
+        # 【关键修改 1】适配 CIFAR-10 的小尺寸 (32x32)
+        # 原版 conv1 是 7x7, stride 2 -> 会丢失太多信息
+        self.backbone.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+
+        # 【关键修改 2】去掉第一层的 MaxPool，防止特征图过早变小
+        self.backbone.maxpool = nn.Identity()
+
+        # 去掉原版全连接层
+        self.backbone.fc = nn.Identity()
+
+        # 新的分类头
+        self.head = nn.Linear(512, num_classes)
         self.feature_dim = feature_dim
 
     def forward(self, x, return_feature=False):
-        z = self.encoder(x)
+        # ResNet 前向传播
+        x = self.backbone.conv1(x)
+        x = self.backbone.bn1(x)
+        x = self.backbone.relu(x)
+        x = self.backbone.maxpool(x)
+
+        x = self.backbone.layer1(x)
+        x = self.backbone.layer2(x)
+        x = self.backbone.layer3(x)
+        x = self.backbone.layer4(x)
+
+        z = self.backbone.avgpool(x)
+        z = torch.flatten(z, 1) # [Batch, 512]
+
         logits = self.head(z)
+
         if return_feature:
             return logits, z
         return logits
@@ -111,7 +134,7 @@ class Client:
         self.device = device
 
     def local_train(self, global_weights, global_stats, args):
-        model = SimpleCNN(feature_dim=args['feature_dim']).to(self.device)
+        model = ResNet18_CIFAR(feature_dim=args['feature_dim']).to(self.device)
         model.load_state_dict(global_weights)
         # 添加 weight decay (L2 正则化)
         optimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.9, weight_decay=5e-4)
@@ -197,8 +220,8 @@ class Client:
 
 # 4. 服务端 (Server)
 class Server:
-    def __init__(self, feature_dim, device='cpu'):
-        self.model = SimpleCNN(feature_dim=feature_dim).to(device)
+    def __init__(self, feature_dim=512, device='cpu'):  # 默认 512 (ResNet-18)
+        self.model = ResNet18_CIFAR(feature_dim=feature_dim).to(device)
         self.feature_dim = feature_dim
         self.device = device
         self.P_global = None
@@ -230,9 +253,9 @@ class Server:
             Cov += torch.eye(self.feature_dim).to(self.device) * 1e-6
             vals, vecs = torch.linalg.eigh(Cov)
 
-            # 【修改点 A】将 k 设置为 8 (仅保留 ~6% 的核心特征)
-            # 原来是 20，对于 SimpleCNN 来说还是太宽了
-            k = 8  # 极度压缩子空间，拒 OOD 于门外
+            # 【ResNet-18 参数】512 维特征，k=64 约 12.5%
+            # ResNet 学习能力强，不需要极端压缩
+            k = 64  # 推荐值: 64-100 (12.5%-19.5%)
             self.P_global = vecs[:, -k:]
             print(f"[Server] Subspace dimension: {k}/{self.feature_dim} ({100*k/self.feature_dim:.1f}%)")
         except Exception as e:
@@ -423,7 +446,7 @@ def main():
     # 2. 初始化服务端
     print("Initializing server...")
     sys.stdout.flush()
-    server = Server(feature_dim=128, device=device)
+    server = Server(feature_dim=512, device=device)  # ResNet-18: 512 维
     global_stats = {'P': None, 'mu': None}
 
     # 3. 联邦训练循环
@@ -460,11 +483,11 @@ def main():
         round_accuracies = []
 
         for i, client in enumerate(clients):
-            # 【修改点 B】将 lambda_gsa 提升至 1.0 (原 0.5)
-            # 十倍强力约束，压扁 ID 特征到极窄子空间
+            # 【ResNet-18 参数】lambda_gsa 回调至 0.1
+            # ResNet 学习能力强，轻微约束即可
             w, s, v_s, epoch_losses, accuracy = client.local_train(
                 server.model.state_dict(), global_stats,
-                {'local_epochs': local_epochs, 'feature_dim': 128, 'lambda_gsa': 1.0}
+                {'local_epochs': local_epochs, 'feature_dim': 512, 'lambda_gsa': 0.1}
             )
 
             # 打印该 client 的训练信息
