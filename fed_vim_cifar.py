@@ -231,12 +231,13 @@ class Server:
     def aggregate(self, local_weights, local_stats, local_vim_stats, sizes):
         total = sum(sizes)
 
-        # 1. 聚合权重
+        # 1. 聚合权重 (FedAvg)
         w_avg = copy.deepcopy(local_weights[0])
         for key in w_avg.keys():
-            w_avg[key] *= sizes[0]/total
+            # 转换为 float32 避免类型不匹配
+            w_avg[key] = w_avg[key].float() * (sizes[0] / total)
             for i in range(1, len(local_weights)):
-                w_avg[key] += local_weights[i][key] * (sizes[i]/total)
+                w_avg[key] += local_weights[i][key].float() * (sizes[i] / total)
         self.model.load_state_dict(w_avg)
 
         # 2. 聚合统计量并更新 P (PCA)
