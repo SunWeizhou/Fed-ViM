@@ -188,20 +188,6 @@ def federated_training(args):
         image_size=args.image_size
     )
 
-    # 预计算测试集类别索引映射（优化个性化评估性能）
-    print("预计算测试集类别索引映射...")
-    test_dataset = test_loader.dataset
-    class_to_test_indices = {}
-    total_test_samples = 0
-    for i, label in enumerate(test_dataset.labels):
-        if label >= 0:  # 只处理有效标签（ID类别）
-            if label not in class_to_test_indices:
-                class_to_test_indices[label] = []
-            class_to_test_indices[label].append(i)
-            total_test_samples += 1
-    print(f"  预计算完成: {len(class_to_test_indices)} 个类别, {total_test_samples} 个样本")
-
-
     # 使用全局数据识别尾部类别
     if client_loaders and len(client_loaders) > 0:
         tail_classes_set = get_global_tail_classes(client_loaders, threshold_ratio=0.5)
@@ -274,40 +260,6 @@ def federated_training(args):
                 # 加载客户端模型状态
                 # 由于 create_clients 已经拷贝了 global weights，这里 load_state_dict 会更新为客户端参数
                 client.model.load_state_dict(saved_client_states[i], strict=False)
-
-    # [优化] 预先生成所有客户端的本地测试加载器，避免在训练循环中重复创建进程
-    print("正在预生成客户端本地测试集 (加速评估)...")
-    client_test_loaders = []
-    test_dataset = test_loader.dataset  # 获取完整的测试集
-
-    for client in clients:
-        # 获取该客户端在训练集中见过的类别
-        subset = client.train_loader.dataset
-        full_train_dataset = subset.dataset
-        client_indices = subset.indices
-        seen_classes = set()
-        for idx in client_indices:
-            seen_classes.add(full_train_dataset.labels[idx])
-
-        # 筛选测试集中对应的类别
-        local_test_indices = [i for i, label in enumerate(test_dataset.labels) if label in seen_classes]
-
-        if len(local_test_indices) > 0:
-            local_test_subset = torch.utils.data.Subset(test_dataset, local_test_indices)
-            # 创建加载器 (持久化)
-            loader = torch.utils.data.DataLoader(
-                local_test_subset,
-                batch_size=args.batch_size,
-                shuffle=False,
-                num_workers=4,  # 既然只创建一次，可以稍微给大点
-                pin_memory=True,
-                persistent_workers=True  # [新增] 关键！保持子进程存活，避免每轮重复初始化
-            )
-            client_test_loaders.append(loader)
-        else:
-            client_test_loaders.append(None)
-
-    print(f"  预生成完成: {len([l for l in client_test_loaders if l is not None])} 个客户端有本地测试集")
 
     # 如果没有恢复历史，初始化历史记录
     if 'training_history' not in locals():
