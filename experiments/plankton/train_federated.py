@@ -403,34 +403,34 @@ def federated_training(args):
             # =========================================================
             print("评估模式: FedAvg (Global Model 承担所有任务)")
 
-                # 1. 基础指标 (ID Acc, Tail Acc)
-                id_acc, tail_acc = evaluate_accuracy_metrics(
-                    server.global_model, test_loader, tail_classes_set, device,
-                )
+            # 1. 基础指标 (ID Acc, Tail Acc)
+            id_acc, tail_acc = evaluate_accuracy_metrics(
+                server.global_model, test_loader, tail_classes_set, device,
+            )
 
-                # 2. 泛化指标 (IN-C Acc)
-                # 注意：这里直接复用 accuracy metrics 函数，但传入 IN-C loader
-                inc_acc, _ = evaluate_accuracy_metrics(
-                    server.global_model, inc_loader, tail_classes_set, device,
-                )
+            # 2. 泛化指标 (IN-C Acc)
+            # 注意：这里直接复用 accuracy metrics 函数，但传入 IN-C loader
+            inc_acc, _ = evaluate_accuracy_metrics(
+                server.global_model, inc_loader, tail_classes_set, device,
+            )
 
-                # 3. OOD 指标 (Near/Far AUROC)
-                # FedAvg 的 OOD 检测基于 Global Model 的特征和 Score Model
-                # 使用 server.evaluate_global_model 获取 OOD 指标
-                test_metrics = server.evaluate_global_model(
-                    test_loader, near_ood_loader, far_ood_loader, inc_loader
-                )
+            # 3. OOD 指标 (Near/Far AUROC)
+            # FedAvg 的 OOD 检测基于 Global Model 的特征和 Score Model
+            # 使用 server.evaluate_global_model 获取 OOD 指标
+            test_metrics = server.evaluate_global_model(
+                test_loader, near_ood_loader, far_ood_loader, inc_loader
+            )
 
-                # 记录
-                current_metrics.update({
-                    'acc_id': id_acc,
-                    'acc_tail': tail_acc,
-                    'acc_inc': inc_acc,
-                    'near_auroc': test_metrics.get('near_auroc', 0.0),
-                    'far_auroc': test_metrics.get('far_auroc', 0.0),
-                    'id_accuracy': test_metrics.get('id_accuracy', 0.0),
-                    'id_loss': test_metrics.get('id_loss', 0.0)
-                })
+            # 记录
+            current_metrics.update({
+                'acc_id': id_acc,
+                'acc_tail': tail_acc,
+                'acc_inc': inc_acc,
+                'near_auroc': test_metrics.get('near_auroc', 0.0),
+                'far_auroc': test_metrics.get('far_auroc', 0.0),
+                'id_accuracy': test_metrics.get('id_accuracy', 0.0),
+                'id_loss': test_metrics.get('id_loss', 0.0)
+            })
 
 
             # --- 打印和保存日志 ---
@@ -569,7 +569,6 @@ def plot_training_curves(history, output_dir):
     # 准确率曲线
     plt.subplot(2, 2, 2)
     plt.plot(history['rounds'], history['test_accuracies'], 'g-', label='Global Head-G Accuracy')
-    if 'avg_person_acc' in history and history['avg_person_acc']:
     if history['inc_accuracies']:
         plt.plot(history['rounds'], history['inc_accuracies'], 'c-', label='IN-C Accuracy')
     plt.xlabel('Communication Rounds')
