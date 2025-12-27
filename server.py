@@ -188,9 +188,10 @@ class FLServer:
                 else:
                     logits, _, features = model_output
 
-                # 1. 收集 Max Logits
-                max_logits, _ = torch.max(logits, dim=1)
-                all_max_logits.append(max_logits.cpu())
+                # 1. 收集 Energy (LogSumExp 替代 Max Logit)
+                # Energy = log(sum(exp(logits))) 捕获所有类别的信息
+                energy = torch.logsumexp(logits, dim=1)
+                all_max_logits.append(energy.cpu())
 
                 # 2. 收集 Residuals
                 z_centered = features - mu
@@ -200,14 +201,14 @@ class FLServer:
                 all_residuals.append(residual.cpu())
 
         # 计算均值
-        mean_max_logit = torch.cat(all_max_logits).mean().item()
+        mean_energy = torch.cat(all_max_logits).mean().item()
         mean_residual = torch.cat(all_residuals).mean().item()
 
-        # 计算 Alpha: 让 Residual 的平均水平 对齐 Logit 的平均水平
-        # ViM 原文公式: alpha = Mean(MaxLogit) / Mean(Residual)
-        alpha = mean_max_logit / (mean_residual + 1e-8)
+        # 计算 Alpha: 让 Residual 的平均水平 对齐 Energy 的平均水平
+        # ViM 改进公式: alpha = Mean(Energy) / Mean(Residual)
+        alpha = mean_energy / (mean_residual + 1e-8)
 
-        print(f"  [Auto-Alpha] ID Mean Logit: {mean_max_logit:.4f} | ID Mean Res: {mean_residual:.4f}")
+        print(f"  [Auto-Alpha] ID Mean Energy: {mean_energy:.4f} | ID Mean Res: {mean_residual:.4f}")
         print(f"  [Auto-Alpha] Calculated Alpha = {alpha:.4f}")
 
         return alpha
@@ -282,15 +283,17 @@ class FLServer:
                     z_recon = torch.matmul(z_proj, P.T)
                     residual = torch.norm(z_centered - z_recon, p=2, dim=1)
 
-                    # 4. 计算 Logit 项 (Max Logit 作为 ID 置信度)
-                    max_logit, _ = torch.max(logits_g, dim=1)
+                    # 4. 计算 Energy (LogSumExp 替代 Max Logit)
+                    # Energy = log(sum(exp(logits))) 捕获所有类别的置信度信息
+                    # 相比 Max Logit，Energy 对分布变化更敏感，更适合 OOD 检测
+                    energy = torch.logsumexp(logits_g, dim=1)
 
                     # 5. 组合 ViM Score
-                    # OOD Score = Residual - alpha * Max Logit
+                    # OOD Score = Residual - alpha * Energy
                     # - Residual 越大 → 偏离全局子空间 → 越可能是 OOD
-                    # - Max Logit 越小 → 模型置信度低 → 越可能是 OOD
-                    # alpha 通过自动校准计算（或在函数初始化时传入）
-                    scores = residual - alpha * max_logit
+                    # - Energy 越小 → 模型整体置信度低 → 越可能是 OOD
+                    # alpha 通过自动校准计算
+                    scores = residual - alpha * energy
 
                 else:
                     # 保底逻辑 (特征范数)
