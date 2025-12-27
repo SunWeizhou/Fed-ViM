@@ -152,10 +152,14 @@ class FLServer:
 
         return {'P': self.P_global, 'mu': self.mu_global}
 
-    def _compute_scores_and_metrics(self, data_loader):
+    def _compute_scores_and_metrics(self, data_loader, vim_stats=None):
         """
         [优化] 一次性计算 Loss, Accuracy 和 OOD Score
         避免重复前向传播
+
+        Args:
+            data_loader: 数据加载器
+            vim_stats: Fed-ViM 全局统计信息，包含 'P' (子空间投影矩阵) 和 'mu' (全局均值)
         """
         self.global_model.eval()
         if self.foogd_module:
@@ -196,12 +200,38 @@ class FLServer:
                     all_preds.extend(preds.cpu().numpy())
                     all_targets.extend(valid_targets.cpu().numpy())
 
-                # 3. 计算 OOD Score (FOOGD) - 对所有样本都计算
+                # 3. 计算 OOD Score - 对所有样本都计算
                 if self.foogd_module:
+                    # FOOGD 逻辑
                     features_norm = F.normalize(features, p=2, dim=1)
                     _, _, scores = self.foogd_module(features_norm)
+
+                elif vim_stats is not None and vim_stats['P'] is not None:
+                    # Fed-ViM 评分逻辑
+                    # 1. 获取 P 和 mu
+                    P = vim_stats['P']
+                    mu = vim_stats['mu']
+
+                    # 2. 中心化
+                    z_centered = features - mu
+
+                    # 3. 计算残差 (Residual)
+                    # z_recon = (z-mu) @ P @ P.T
+                    z_proj = torch.matmul(z_centered, P)
+                    z_recon = torch.matmul(z_proj, P.T)
+                    residual = torch.norm(z_centered - z_recon, p=2, dim=1)
+
+                    # 4. 评分
+                    # ViM 的完整公式是 Logit - alpha * Residual
+                    # 但为了快速验证 GSA 的效果，直接用 Residual 就应该能看到巨大提升
+                    # 注意：Residual 越小越是 ID，越大越是 OOD
+                    # AUROC计算通常假设 Score 越大越是 OOD，所以直接用 residual 即可
+                    scores = residual
+
                 else:
+                    # 保底逻辑 (特征范数)
                     scores = torch.norm(features, dim=1)
+
                 all_scores.extend(scores.cpu().numpy())
 
         # 整理结果
@@ -220,16 +250,23 @@ class FLServer:
             'targets': np.array(all_targets) # 保留targets以防未来需要
         }
 
-    def evaluate_global_model(self, test_loader, near_ood_loader, far_ood_loader, inc_loader=None):
+    def evaluate_global_model(self, test_loader, near_ood_loader, far_ood_loader, inc_loader=None, vim_stats=None):
         """
         [优化版] 评估全局模型性能 - 消除冗余计算
+
+        Args:
+            test_loader: 测试数据加载器 (ID 数据)
+            near_ood_loader: Near-OOD 数据加载器
+            far_ood_loader: Far-OOD 数据加载器
+            inc_loader: IN-C 数据加载器 (可选)
+            vim_stats: Fed-ViM 全局统计信息 (可选)
         """
         metrics = {}
         print("  正在评估 Global Model (优化版)...")
 
         # 1. 计算 ID (Clean) 的所有指标 [只跑一次!]
         # 这包含了 Accuracy, Loss, 和用于 OOD 对比的 ID Scores
-        id_results = self._compute_scores_and_metrics(test_loader)
+        id_results = self._compute_scores_and_metrics(test_loader, vim_stats)
 
         metrics['id_accuracy'] = id_results['accuracy']
         metrics['id_loss'] = id_results['loss']
@@ -239,7 +276,7 @@ class FLServer:
 
         # 2. 评估 IN-C (如果存在)
         if inc_loader:
-            inc_results = self._compute_scores_and_metrics(inc_loader)
+            inc_results = self._compute_scores_and_metrics(inc_loader, vim_stats)
             metrics['inc_accuracy'] = inc_results['accuracy']
             print(f"    -> IN-C Acc: {metrics['inc_accuracy']:.4f}")
 
@@ -255,7 +292,7 @@ class FLServer:
         # Near-OOD
         if near_ood_loader:
             # 只需跑 Near-OOD 的前向传播
-            near_results = self._compute_scores_and_metrics(near_ood_loader)
+            near_results = self._compute_scores_and_metrics(near_ood_loader, vim_stats)
             near_scores = near_results['scores']
             metrics['near_auroc'] = compute_auroc(id_scores, near_scores)
             print(f"    -> Near AUROC: {metrics['near_auroc']:.4f}")
@@ -263,7 +300,7 @@ class FLServer:
         # Far-OOD
         if far_ood_loader:
             # 只需跑 Far-OOD 的前向传播
-            far_results = self._compute_scores_and_metrics(far_ood_loader)
+            far_results = self._compute_scores_and_metrics(far_ood_loader, vim_stats)
             far_scores = far_results['scores']
             metrics['far_auroc'] = compute_auroc(id_scores, far_scores)
             print(f"    -> Far AUROC: {metrics['far_auroc']:.4f}")

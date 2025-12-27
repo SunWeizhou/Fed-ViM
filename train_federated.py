@@ -418,7 +418,8 @@ def federated_training(args):
             # FedAvg 的 OOD 检测基于 Global Model 的特征和 Score Model
             # 使用 server.evaluate_global_model 获取 OOD 指标
             test_metrics = server.evaluate_global_model(
-                test_loader, near_ood_loader, far_ood_loader, inc_loader
+                test_loader, near_ood_loader, far_ood_loader, inc_loader,
+                vim_stats=global_vim_stats  # 传入 Fed-ViM 全局统计信息
             )
 
             # 记录
