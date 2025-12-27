@@ -20,7 +20,7 @@ from models import create_model
 from data_utils import create_federated_loaders
 from client import FLClient
 from server import FLServer
-from eval_utils import generate_evaluation_report, get_tail_classes, evaluate_accuracy_metrics
+from eval_utils import generate_evaluation_report, get_tail_classes
 
 def set_seed(seed):
     """固定所有随机种子，确保实验可复现"""
@@ -31,77 +31,6 @@ def set_seed(seed):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     print(f"Random Seed set to: {seed}")
-
-
-def get_global_tail_classes(client_loaders, threshold_ratio=0.5):
-    """
-    通过聚合所有客户端的数据来统计全局长尾分布
-
-    Args:
-        client_loaders: 客户端DataLoader列表
-        threshold_ratio: 定义尾部的比例 (例如 0.5 表示样本数最少的 50% 类别)
-
-    Returns:
-        tail_classes_set: 包含尾部类别索引的集合
-    """
-    print("正在计算全局类别分布以定义尾部类别...")
-
-    # 检查空列表
-    if not client_loaders:
-        print("  警告: 客户端列表为空，返回空集合")
-        return set()
-
-    # 1. 初始化计数器
-    global_class_counts = {}
-
-    # 2. 遍历所有客户端
-    for client_id, loader in enumerate(client_loaders):
-        dataset = loader.dataset
-
-        # 处理 Subset 对象
-        if hasattr(dataset, 'indices') and hasattr(dataset, 'dataset'):
-            # 这是一个 Subset 对象
-            full_dataset = dataset.dataset
-            indices = dataset.indices
-
-            # 统计该客户端拥有的样本标签
-            for idx in indices:
-                label = full_dataset.labels[idx]
-                global_class_counts[label] = global_class_counts.get(label, 0) + 1
-        else:
-            # 直接访问数据集
-            # 假设数据集有 labels 属性
-            if hasattr(dataset, 'labels'):
-                labels = dataset.labels
-                for label in labels:
-                    global_class_counts[label] = global_class_counts.get(label, 0) + 1
-            else:
-                # 遍历数据集获取标签
-                for _, label in loader:
-                    if isinstance(label, torch.Tensor):
-                        label = label.item()
-                    global_class_counts[label] = global_class_counts.get(label, 0) + 1
-
-    # 检查是否有数据
-    if not global_class_counts:
-        print("  警告: 未找到任何类别数据，返回空集合")
-        return set()
-
-    # 3. 排序：按样本数从少到多
-    # items() 返回 (label, count) 元组
-    sorted_classes = sorted(global_class_counts.items(), key=lambda x: x[1])
-
-    # 打印一下最少和最多的类，确认统计无误
-    print(f"  - 全局样本最少的类: ID {sorted_classes[0][0]} (样本数: {sorted_classes[0][1]})")
-    print(f"  - 全局样本最多的类: ID {sorted_classes[-1][0]} (样本数: {sorted_classes[-1][1]})")
-
-    # 4. 截取尾部类别 (前 threshold_ratio 比例)
-    n_tail = int(len(sorted_classes) * threshold_ratio)
-    tail_classes = [c[0] for c in sorted_classes[:n_tail]]
-
-    print(f"  - 定义了 {len(tail_classes)} 个尾部类别 (Tail Classes)")
-
-    return set(tail_classes)
 
 
 def setup_experiment(args):
@@ -188,14 +117,6 @@ def federated_training(args):
         image_size=args.image_size
     )
 
-    # 使用全局数据识别尾部类别
-    if client_loaders and len(client_loaders) > 0:
-        tail_classes_set = get_global_tail_classes(client_loaders, threshold_ratio=0.5)
-        print(f"  全局尾部类别识别完成: {len(tail_classes_set)} 个尾部类别")
-    else:
-        tail_classes_set = set()
-        print("  警告: 无法识别尾部类别，使用空集合")
-
     # 创建全局模型
     print("\n创建全局模型...")
     global_model, foogd_module = create_model(
@@ -268,7 +189,6 @@ def federated_training(args):
             'train_losses': [],
             'test_accuracies': [],     # [修复] 添加缺失的键
             'test_losses': [],
-            'tail_accuracies': [],      # 尾部类别准确率
             'hierarchical_errors': [],  # 层级错误
             'inc_accuracies': [],       # IN-C 准确率
             'near_auroc': [],           # Near-OOD AUROC
@@ -355,17 +275,7 @@ def federated_training(args):
             # =========================================================
             print("评估模式: FedAvg (Global Model 承担所有任务)")
 
-            # 1. 基础指标 (ID Acc, Tail Acc)
-            # 注意：这里调用 evaluate_accuracy_metrics 是为了计算 Tail Acc（尾部类别准确率）
-            # 虽然 server.evaluate_global_model 也会算 ID Acc，但它不包含 Tail Acc 的细分
-            # TODO: 未来可以将 Tail Acc 计算集成到 server.evaluate_global_model 中以避免重复计算
-            id_acc, tail_acc = evaluate_accuracy_metrics(
-                server.global_model, test_loader, tail_classes_set, device,
-            )
-
-            # 2. OOD 指标 (ID Acc, Loss, Near/Far AUROC, IN-C Acc)
-            # server.evaluate_global_model 已经计算了 ID Acc, ID Loss, IN-C Acc 和所有 OOD 指标
-            # 注意：这里会再次遍历 test_loader 计算 ID Acc（与第1步重复）
+            # 评估所有指标 (ID Acc, Loss, Near/Far AUROC, IN-C Acc)
             test_metrics = server.evaluate_global_model(
                 test_loader, near_ood_loader, far_ood_loader, inc_loader,
                 vim_stats=global_vim_stats  # 传入 Fed-ViM 全局统计信息
@@ -373,9 +283,8 @@ def federated_training(args):
 
             # 记录
             current_metrics.update({
-                'acc_id': id_acc,  # 使用第1步计算的 ID Acc（与 Tail Acc 一致）
-                'acc_tail': tail_acc,
-                'acc_inc': test_metrics.get('inc_accuracy', 0.0),  # 使用 server 的结果（避免第3次遍历 inc_loader）
+                'acc_id': test_metrics.get('id_accuracy', 0.0),
+                'acc_inc': test_metrics.get('inc_accuracy', 0.0),
                 'near_auroc': test_metrics.get('near_auroc', 0.0),
                 'far_auroc': test_metrics.get('far_auroc', 0.0),
                 'id_accuracy': test_metrics.get('id_accuracy', 0.0),
@@ -385,7 +294,6 @@ def federated_training(args):
 
             # --- 打印和保存日志 ---
             print(f"  [Result] ID Acc: {current_metrics['acc_id']:.4f}")
-            print(f"  [Result] Tail Acc: {current_metrics['acc_tail']:.4f}")
             print(f"  [Result] IN-C Acc: {current_metrics['acc_inc']:.4f}")
             print(f"  [Result] Near AUROC: {current_metrics['near_auroc']:.4f}")
             print(f"  [Result] Far AUROC: {current_metrics['far_auroc']:.4f}")
@@ -394,7 +302,6 @@ def federated_training(args):
             training_history['rounds'].append(round_num + 1)
             training_history['test_accuracies'].append(current_metrics['acc_id'])
             training_history['test_losses'].append(current_metrics['id_loss'])
-            training_history['tail_accuracies'].append(current_metrics['acc_tail'])
             training_history['inc_accuracies'].append(current_metrics['acc_inc'])
             training_history['near_auroc'].append(current_metrics['near_auroc'])
             training_history['far_auroc'].append(current_metrics['far_auroc'])
@@ -626,15 +533,6 @@ def main():
     else:
         print("警告: 未找到全局准确率数据")
         final_acc = 0.0
-
-    # 尾部类别准确率
-    if 'tail_accuracies' in training_history and training_history['tail_accuracies']:
-        final_tail_acc = training_history['tail_accuracies'][-1]
-        print(f"最终尾部类别准确率: {final_tail_acc:.4f}")
-        if final_acc > 0:
-            print(f"尾部性能差距: {final_acc - final_tail_acc:.4f}")
-    else:
-        print("提示: 未计算尾部类别准确率")
 
     # 层级错误
     if 'hierarchical_errors' in training_history and training_history['hierarchical_errors']:
