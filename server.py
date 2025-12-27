@@ -18,6 +18,10 @@ class FLServer:
         self.P_global = None
         self.mu_global = None
 
+        # [新增] ViM alpha 参数（用于平衡 Residual 和 Logit）
+        self.alpha = 1.0  # 默认值
+        self.alpha_calibrated = False  # 标记是否已校准
+
     def get_global_parameters(self):
         """获取全局参数 (Model + FOOGD) - 修复版"""
         # [修复] 返回带前缀的参数，与 client.set_generic_parameters 保持一致
@@ -152,7 +156,63 @@ class FLServer:
 
         return {'P': self.P_global, 'mu': self.mu_global}
 
-    def _compute_scores_and_metrics(self, data_loader, vim_stats=None):
+    def _compute_id_statistics(self, data_loader, vim_stats):
+        """
+        [新增] 专门用于计算 Alpha 的校准函数
+
+        在 ID 数据上统计 Max Logit 和 Residual 的均值，计算最优 alpha
+        使得两个项在数值上平衡
+
+        Args:
+            data_loader: ID 测试数据加载器
+            vim_stats: Fed-ViM 全局统计信息
+
+        Returns:
+            float: 计算得到的 alpha 值
+        """
+        self.global_model.eval()
+        all_max_logits = []
+        all_residuals = []
+
+        P = vim_stats['P']
+        mu = vim_stats['mu']
+
+        with torch.no_grad():
+            for data, _ in data_loader:
+                data = data.to(self.device)
+
+                # 前向传播
+                model_output = self.global_model(data)
+                if len(model_output) == 2:
+                    logits, features = model_output
+                else:
+                    logits, _, features = model_output
+
+                # 1. 收集 Max Logits
+                max_logits, _ = torch.max(logits, dim=1)
+                all_max_logits.append(max_logits.cpu())
+
+                # 2. 收集 Residuals
+                z_centered = features - mu
+                z_proj = torch.matmul(z_centered, P)
+                z_recon = torch.matmul(z_proj, P.T)
+                residual = torch.norm(z_centered - z_recon, p=2, dim=1)
+                all_residuals.append(residual.cpu())
+
+        # 计算均值
+        mean_max_logit = torch.cat(all_max_logits).mean().item()
+        mean_residual = torch.cat(all_residuals).mean().item()
+
+        # 计算 Alpha: 让 Residual 的平均水平 对齐 Logit 的平均水平
+        # ViM 原文公式: alpha = Mean(MaxLogit) / Mean(Residual)
+        alpha = mean_max_logit / (mean_residual + 1e-8)
+
+        print(f"  [Auto-Alpha] ID Mean Logit: {mean_max_logit:.4f} | ID Mean Res: {mean_residual:.4f}")
+        print(f"  [Auto-Alpha] Calculated Alpha = {alpha:.4f}")
+
+        return alpha
+
+    def _compute_scores_and_metrics(self, data_loader, vim_stats=None, alpha=1.0):
         """
         [优化] 一次性计算 Loss, Accuracy 和 OOD Score
         避免重复前向传播
@@ -160,6 +220,7 @@ class FLServer:
         Args:
             data_loader: 数据加载器
             vim_stats: Fed-ViM 全局统计信息，包含 'P' (子空间投影矩阵) 和 'mu' (全局均值)
+            alpha: ViM 评分的平衡系数（默认1.0，自动校准时会覆盖）
         """
         self.global_model.eval()
         if self.foogd_module:
@@ -228,8 +289,7 @@ class FLServer:
                     # OOD Score = Residual - alpha * Max Logit
                     # - Residual 越大 → 偏离全局子空间 → 越可能是 OOD
                     # - Max Logit 越小 → 模型置信度低 → 越可能是 OOD
-                    # alpha = 1.0 作为平衡系数（Residual 和 Logit 通常在相同数量级，约 10.0）
-                    alpha = 1.0
+                    # alpha 通过自动校准计算（或在函数初始化时传入）
                     scores = residual - alpha * max_logit
 
                 else:
@@ -266,11 +326,19 @@ class FLServer:
             vim_stats: Fed-ViM 全局统计信息 (可选)
         """
         metrics = {}
-        print("  正在评估 Global Model (优化版)...")
+        print("  正在评估 Global Model (SOTA 版)...")
 
-        # 1. 计算 ID (Clean) 的所有指标 [只跑一次!]
-        # 这包含了 Accuracy, Loss, 和用于 OOD 对比的 ID Scores
-        id_results = self._compute_scores_and_metrics(test_loader, vim_stats)
+        # --- [关键新增] 动态计算 Alpha ---
+        current_alpha = 1.0  # 默认值
+        if vim_stats is not None and vim_stats['P'] is not None and not self.foogd_module:
+            print("  正在根据 ID 数据校准 Alpha 参数...")
+            current_alpha = self._compute_id_statistics(test_loader, vim_stats)
+            self.alpha = current_alpha  # 保存起来供后续使用
+            self.alpha_calibrated = True
+        # -------------------------------
+
+        # 1. 计算 ID (Clean) 的所有指标 [使用校准后的 alpha]
+        id_results = self._compute_scores_and_metrics(test_loader, vim_stats, alpha=current_alpha)
 
         metrics['id_accuracy'] = id_results['accuracy']
         metrics['id_loss'] = id_results['loss']
@@ -280,11 +348,11 @@ class FLServer:
 
         # 2. 评估 IN-C (如果存在)
         if inc_loader:
-            inc_results = self._compute_scores_and_metrics(inc_loader, vim_stats)
+            inc_results = self._compute_scores_and_metrics(inc_loader, vim_stats, alpha=current_alpha)
             metrics['inc_accuracy'] = inc_results['accuracy']
             print(f"    -> IN-C Acc: {metrics['inc_accuracy']:.4f}")
 
-        # 3. 评估 OOD 检测 (复用 id_scores)
+        # 3. 评估 OOD 检测 (复用 id_scores，使用相同的 alpha)
         from sklearn.metrics import roc_auc_score
 
         # 辅助函数：计算 AUROC
@@ -296,7 +364,7 @@ class FLServer:
         # Near-OOD
         if near_ood_loader:
             # 只需跑 Near-OOD 的前向传播
-            near_results = self._compute_scores_and_metrics(near_ood_loader, vim_stats)
+            near_results = self._compute_scores_and_metrics(near_ood_loader, vim_stats, alpha=current_alpha)
             near_scores = near_results['scores']
             metrics['near_auroc'] = compute_auroc(id_scores, near_scores)
             print(f"    -> Near AUROC: {metrics['near_auroc']:.4f}")
@@ -304,7 +372,7 @@ class FLServer:
         # Far-OOD
         if far_ood_loader:
             # 只需跑 Far-OOD 的前向传播
-            far_results = self._compute_scores_and_metrics(far_ood_loader, vim_stats)
+            far_results = self._compute_scores_and_metrics(far_ood_loader, vim_stats, alpha=current_alpha)
             far_scores = far_results['scores']
             metrics['far_auroc'] = compute_auroc(id_scores, far_scores)
             print(f"    -> Far AUROC: {metrics['far_auroc']:.4f}")
