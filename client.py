@@ -201,15 +201,26 @@ class FLClient:
                         gsa_loss = 0.5 * loss_clean + 0.5 * loss_aug
                         gsa_loss_val = gsa_loss.item()
 
+                        # 4. Cosine Soft-Start 权重调度 (5轮过渡期)
+                        ramp_steps = 5.0
+                        step = min(ramp_steps, current_round - warmup_rounds)
+
+                        # Cosine 曲线: 0 -> 1 (平滑无感介入)
+                        factor = 0.5 * (1 - np.cos(np.pi * (step / ramp_steps)))
+
+                        # 目标权重设为 0.1 (降低对分类任务的影响)
+                        target_lambda = 0.1
+                        lambda_gsa = target_lambda * factor
+
                         # 在 GSA 激活的第一轮打印提示
                         if batch_idx == 0 and epoch == 0:
-                            print(f"  [Round {current_round}] GSA Loss Activated!")
+                            print(f"  [Round {current_round}] GSA Loss Activated! λ={lambda_gsa:.4f} (target={target_lambda})")
                     else:
                         # Warm-up 阶段或不使用 Fed-ViM 时,GSA Loss 为 0
                         gsa_loss_val = 0.0
+                        lambda_gsa = 0.0
 
                     # 应用动态权重
-                    lambda_gsa = 1.0  # Fed-ViM 权重
                     loss_for_main = classification_loss + lambda_gsa * gsa_loss + effective_lambda_ksd * ksd_loss
 
                 # [修正3] 删除 retain_graph=True，释放显存
