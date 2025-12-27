@@ -207,7 +207,7 @@ class FLServer:
                     _, _, scores = self.foogd_module(features_norm)
 
                 elif vim_stats is not None and vim_stats['P'] is not None:
-                    # Fed-ViM 评分逻辑
+                    # Fed-ViM 评分逻辑 (完整版 ViM Score)
                     # 1. 获取 P 和 mu
                     P = vim_stats['P']
                     mu = vim_stats['mu']
@@ -221,12 +221,16 @@ class FLServer:
                     z_recon = torch.matmul(z_proj, P.T)
                     residual = torch.norm(z_centered - z_recon, p=2, dim=1)
 
-                    # 4. 评分
-                    # ViM 的完整公式是 Logit - alpha * Residual
-                    # 但为了快速验证 GSA 的效果，直接用 Residual 就应该能看到巨大提升
-                    # 注意：Residual 越小越是 ID，越大越是 OOD
-                    # AUROC计算通常假设 Score 越大越是 OOD，所以直接用 residual 即可
-                    scores = residual
+                    # 4. 计算 Logit 项 (Max Logit 作为 ID 置信度)
+                    max_logit, _ = torch.max(logits_g, dim=1)
+
+                    # 5. 组合 ViM Score
+                    # OOD Score = Residual - alpha * Max Logit
+                    # - Residual 越大 → 偏离全局子空间 → 越可能是 OOD
+                    # - Max Logit 越小 → 模型置信度低 → 越可能是 OOD
+                    # alpha = 1.0 作为平衡系数（Residual 和 Logit 通常在相同数量级，约 10.0）
+                    alpha = 1.0
+                    scores = residual - alpha * max_logit
 
                 else:
                     # 保底逻辑 (特征范数)
