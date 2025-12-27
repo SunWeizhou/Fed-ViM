@@ -296,7 +296,7 @@ def create_federated_loaders(data_root, n_clients=10, alpha=0.1, batch_size=32, 
             batch_size=batch_size,
             shuffle=True,
             drop_last=True,
-            num_workers=8,     # 多进程加载数据
+            num_workers=16,    # 多进程加载数据（优化为CPU核心数的40%）
             pin_memory=True,   # 开启锁页内存，加速 CPU->GPU 传输
             persistent_workers=True # 避免每个epoch结束后销毁进程重建的开销
         )
@@ -312,21 +312,21 @@ def create_federated_loaders(data_root, n_clients=10, alpha=0.1, batch_size=32, 
         test_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=8,
+        num_workers=16,
         pin_memory=True
     )
     near_ood_loader = DataLoader(
         near_ood_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=8,
+        num_workers=16,
         pin_memory=True
     )
     far_ood_loader = DataLoader(
         far_ood_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=8,
+        num_workers=16,
         pin_memory=True
     )
 
@@ -372,7 +372,7 @@ def create_test_loaders_only(data_root, batch_size=32, image_size=224):
         test_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=8,
+        num_workers=16,
         pin_memory=True
     )
 
@@ -380,7 +380,7 @@ def create_test_loaders_only(data_root, batch_size=32, image_size=224):
         near_ood_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=8,
+        num_workers=16,
         pin_memory=True
     )
 
@@ -388,7 +388,7 @@ def create_test_loaders_only(data_root, batch_size=32, image_size=224):
         far_ood_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=8,
+        num_workers=16,
         pin_memory=True
     )
 
@@ -466,7 +466,7 @@ def get_inc_loader(data_root, batch_size=32, image_size=224, severity=3):
         inc_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=8,
+        num_workers=16,
         pin_memory=True
     )
     return inc_loader
