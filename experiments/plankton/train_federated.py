@@ -568,13 +568,13 @@ def plot_training_curves(history, output_dir):
 
     # 准确率曲线
     plt.subplot(2, 2, 2)
-    plt.plot(history['rounds'], history['test_accuracies'], 'g-', label='Global Head-G Accuracy')
+    plt.plot(history['rounds'], history['test_accuracies'], 'g-', label='Test Accuracy')
     if history['inc_accuracies']:
         plt.plot(history['rounds'], history['inc_accuracies'], 'c-', label='IN-C Accuracy')
     plt.xlabel('Communication Rounds')
     plt.ylabel('Accuracy')
     plt.legend()
-    plt.title('Test Accuracy (Global vs Personal vs IN-C)')
+    plt.title('Test Accuracy')
 
     # OOD检测性能
     if history['near_auroc']:
