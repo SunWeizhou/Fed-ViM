@@ -672,15 +672,10 @@ def main():
     # 全局准确率
     if training_history['test_accuracies']:
         final_acc = training_history['test_accuracies'][-1]
-        print(f"最终全局准确率 (Head-G): {final_acc:.4f}")
+        print(f"最终准确率: {final_acc:.4f}")
     else:
         print("警告: 未找到全局准确率数据")
         final_acc = 0.0
-
-    # 对于 FedAvg, test_accuracies 是全局模型的准确率
-    print(f"最终准确率: {final_acc:.4f}")
-    else:
-        print("  (FedAvg: 这是全局模型的准确率)")
 
     # 尾部类别准确率
     if 'tail_accuracies' in training_history and training_history['tail_accuracies']:
