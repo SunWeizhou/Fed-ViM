@@ -127,25 +127,25 @@ def evaluate_ood(model, id_loader, ood_loader, device, use_energy=False):
     print("="*60)
 
     if use_energy:
-        # FOOGD 模型 (使用 Energy)
-        print("\n使用 Energy-based OOD 检测...")
+        # FOOGD 模型 - 需要加载 FOOGD 模块
+        print("\n警告: 当前评估脚本不支持 FOOGD 完整评估")
+        print("建议查看训练日志中的 Near/Far AUROC 指标")
+
+        # 临时使用 Energy 作为保底
+        print("\n使用保底方法: Energy-based OOD 检测...")
 
         # 提取 ID 数据 logit
         id_logits = []
-        id_labels = []
-
         with torch.no_grad():
-            for images, labels in id_loader:
+            for images, _ in id_loader:
                 images = images.to(device)
                 logits, _ = model(images)
                 id_logits.append(logits.cpu())
-                id_labels.extend(labels.numpy())
 
         id_logits = torch.cat(id_logits, dim=0)
 
         # 提取 OOD 数据 logit
         ood_logits = []
-
         with torch.no_grad():
             for images, _ in ood_loader:
                 images = images.to(device)
@@ -154,34 +154,26 @@ def evaluate_ood(model, id_loader, ood_loader, device, use_energy=False):
 
         ood_logits = torch.cat(ood_logits, dim=0)
 
-        # 计算 Energy 分数
-        id_energy = compute_energy_scores(id_logits)
-        ood_energy = compute_energy_scores(ood_logits)
+        # 计算 Energy 分数 (负号: 低 energy = OOD)
+        id_scores = -torch.logsumexp(id_logits, dim=1).numpy()
+        ood_scores = -torch.logsumexp(ood_logits, dim=1).numpy()
 
-        # Energy 越高越可能是 ID,越低越可能是 OOD
-        # 但为了统一评估 (分数高=ID,分数低=OOD),我们取负号
-        id_scores = -id_energy
-        ood_scores = -ood_energy
-
-        method_name = "Energy (LogSumExp)"
+        method_name = "Energy (保底方法 - 不准确)"
 
     else:
-        # Fed-ViM 模型 (使用 ViM: Max Logit - Distance)
-        print("\n使用 ViM (Max Logit - α·Distance) OOD 检测...")
+        # Fed-ViM 模型 - 使用正确的 ViM Score
+        print("\n使用 Fed-ViM OOD 检测 (Residual - α·Energy)...")
 
         # 提取 ID 数据特征和 logit
         id_features = []
         id_logits = []
-        id_labels = []
 
         with torch.no_grad():
             for images, labels in id_loader:
                 images = images.to(device)
                 logits, features = model(images)
-
                 id_features.append(features.cpu())
                 id_logits.append(logits.cpu())
-                id_labels.extend(labels.numpy())
 
         id_features = torch.cat(id_features, dim=0)
         id_logits = torch.cat(id_logits, dim=0)
@@ -194,37 +186,40 @@ def evaluate_ood(model, id_loader, ood_loader, device, use_energy=False):
             for images, _ in ood_loader:
                 images = images.to(device)
                 logits, features = model(images)
-
                 ood_features.append(features.cpu())
                 ood_logits.append(logits.cpu())
 
         ood_features = torch.cat(ood_features, dim=0)
         ood_logits = torch.cat(ood_logits, dim=0)
 
-        # 计算 Max Logit
-        id_max_logit = torch.max(id_logits, dim=1)[0].numpy()
-        ood_max_logit = torch.max(ood_logits, dim=1)[0].numpy()
+        # 计算特征均值 (作为全局子空间中心)
+        feature_mean = id_features.mean(dim=0)
 
-        # 计算特征均值
-        feature_mean = id_features.mean(dim=0).numpy()
+        # 计算残差 (Residual)
+        # Residual = ||(I - PP^T)(z - mu)||
+        # 简化版本: 使用到特征均值的距离作为残差代理
+        id_residual = torch.norm(id_features - feature_mean, p=2, dim=1).numpy()
+        ood_residual = torch.norm(ood_features - feature_mean, p=2, dim=1).numpy()
 
-        # 计算距离 (欧氏距离)
-        id_distances = np.linalg.norm(id_features.numpy() - feature_mean, axis=1)
-        ood_distances = np.linalg.norm(ood_features.numpy() - feature_mean, axis=1)
+        # 计算 Energy (LogSumExp)
+        id_energy = torch.logsumexp(id_logits, dim=1).numpy()
+        ood_energy = torch.logsumexp(ood_logits, dim=1).numpy()
 
         # 自动校准 alpha
-        alpha = np.mean(id_max_logit) / (np.mean(id_distances) + 1e-8)
+        # alpha = mean(Residual) / mean(Energy)
+        alpha = np.mean(id_residual) / (np.mean(id_energy) + 1e-8)
         print(f"  - 自动校准 Alpha: {alpha:.4f}")
-        print(f"  - ID Max Logit 均值: {np.mean(id_max_logit):.4f}")
-        print(f"  - ID Distance 均值: {np.mean(id_distances):.4f}")
-        print(f"  - OOD Max Logit 均值: {np.mean(ood_max_logit):.4f}")
-        print(f"  - OOD Distance 均值: {np.mean(ood_distances):.4f}")
+        print(f"  - ID Residual 均值: {np.mean(id_residual):.4f}")
+        print(f"  - ID Energy 均值: {np.mean(id_energy):.4f}")
+        print(f"  - OOD Residual 均值: {np.mean(ood_residual):.4f}")
+        print(f"  - OOD Energy 均值: {np.mean(ood_energy):.4f}")
 
-        # ViM 分数 = Max Logit - alpha * Distance
-        id_scores = id_max_logit - alpha * id_distances
-        ood_scores = ood_max_logit - alpha * ood_distances
+        # ViM Score = Residual - alpha * Energy
+        # 分数越高 → 越可能是 OOD
+        id_scores = id_residual - alpha * id_energy
+        ood_scores = ood_residual - alpha * ood_energy
 
-        method_name = "ViM (MaxLogit - α·Distance)"
+        method_name = "ViM (Residual - α·Energy)"
 
     # 评估 OOD 检测
     id_labels_numpy = np.zeros(len(id_scores))
@@ -241,7 +236,6 @@ def evaluate_ood(model, id_loader, ood_loader, device, use_energy=False):
     aupr = auc(recall, precision)
 
     # 计算 FPR95 (TPR=0.95 时的 FPR)
-    # 找到 TPR 最接近 0.95 的阈值
     fpr, tpr, thresholds = roc_curve(all_labels, all_scores)
     idx = np.argmin(np.abs(tpr - 0.95))
     fpr95 = fpr[idx]
