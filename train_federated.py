@@ -404,19 +404,16 @@ def federated_training(args):
             print("评估模式: FedAvg (Global Model 承担所有任务)")
 
             # 1. 基础指标 (ID Acc, Tail Acc)
+            # 注意：这里调用 evaluate_accuracy_metrics 是为了计算 Tail Acc（尾部类别准确率）
+            # 虽然 server.evaluate_global_model 也会算 ID Acc，但它不包含 Tail Acc 的细分
+            # TODO: 未来可以将 Tail Acc 计算集成到 server.evaluate_global_model 中以避免重复计算
             id_acc, tail_acc = evaluate_accuracy_metrics(
                 server.global_model, test_loader, tail_classes_set, device,
             )
 
-            # 2. 泛化指标 (IN-C Acc)
-            # 注意：这里直接复用 accuracy metrics 函数，但传入 IN-C loader
-            inc_acc, _ = evaluate_accuracy_metrics(
-                server.global_model, inc_loader, tail_classes_set, device,
-            )
-
-            # 3. OOD 指标 (Near/Far AUROC)
-            # FedAvg 的 OOD 检测基于 Global Model 的特征和 Score Model
-            # 使用 server.evaluate_global_model 获取 OOD 指标
+            # 2. OOD 指标 (ID Acc, Loss, Near/Far AUROC, IN-C Acc)
+            # server.evaluate_global_model 已经计算了 ID Acc, ID Loss, IN-C Acc 和所有 OOD 指标
+            # 注意：这里会再次遍历 test_loader 计算 ID Acc（与第1步重复）
             test_metrics = server.evaluate_global_model(
                 test_loader, near_ood_loader, far_ood_loader, inc_loader,
                 vim_stats=global_vim_stats  # 传入 Fed-ViM 全局统计信息
@@ -424,9 +421,9 @@ def federated_training(args):
 
             # 记录
             current_metrics.update({
-                'acc_id': id_acc,
+                'acc_id': id_acc,  # 使用第1步计算的 ID Acc（与 Tail Acc 一致）
                 'acc_tail': tail_acc,
-                'acc_inc': inc_acc,
+                'acc_inc': test_metrics.get('inc_accuracy', 0.0),  # 使用 server 的结果（避免第3次遍历 inc_loader）
                 'near_auroc': test_metrics.get('near_auroc', 0.0),
                 'far_auroc': test_metrics.get('far_auroc', 0.0),
                 'id_accuracy': test_metrics.get('id_accuracy', 0.0),
