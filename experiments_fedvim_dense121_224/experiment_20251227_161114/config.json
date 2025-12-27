@@ -1,0 +1,22 @@
+{
+  "data_root": "./Plankton_OOD_Dataset",
+  "n_clients": 5,
+  "alpha": 0.1,
+  "communication_rounds": 30,
+  "local_epochs": 4,
+  "batch_size": 96,
+  "client_fraction": 1.0,
+  "model_type": "densenet121",
+  "use_foogd": false,
+  "use_fedvim": true,
+  "image_size": 224,
+  "eval_frequency": 1,
+  "save_frequency": 10,
+  "device": "cuda",
+  "output_dir": "./experiments_fedvim_dense121_224",
+  "seed": 42,
+  "resume": false,
+  "compute_aug_features": true,
+  "freeze_bn": 0,
+  "base_lr": 0.01
+}

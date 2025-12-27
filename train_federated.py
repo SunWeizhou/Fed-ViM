@@ -146,7 +146,7 @@ def federated_training(args):
         if checkpoints and args.resume: # 假设你在 argparse 加了 --resume
             latest_ckpt = os.path.join(checkpoint_dir, checkpoints[-1])
             print(f"!!! 发现检查点，准备恢复: {latest_ckpt} !!!")
-            ckpt = torch.load(latest_ckpt)
+            ckpt = torch.load(latest_ckpt, weights_only=False)
 
             # 恢复 Server
             server.global_model.load_state_dict(ckpt['global_model_state_dict'])
@@ -372,7 +372,7 @@ def federated_training(args):
 
     if os.path.exists(best_model_path):
         print(f"★ 正在加载历史最优模型进行评估: {best_model_path}")
-        checkpoint = torch.load(best_model_path)
+        checkpoint = torch.load(best_model_path, weights_only=False)
 
         # 加载参数
         server.global_model.load_state_dict(checkpoint['global_model_state_dict'])
