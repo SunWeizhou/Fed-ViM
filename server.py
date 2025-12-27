@@ -174,7 +174,12 @@ class FLServer:
                 data, targets = data.to(self.device), targets.to(self.device)
 
                 # 1. 前向传播 (Backbone + Heads)
-                logits_g, _, features = self.global_model(data)
+                # 处理不同模型的返回值：FedAvg_Model返回2个值，FedRoD返回3个值
+                model_output = self.global_model(data)
+                if len(model_output) == 2:
+                    logits_g, features = model_output
+                else:  # len(model_output) == 3
+                    logits_g, _, features = model_output
 
                 # 2. 计算分类指标（仅当标签有效时）
                 # OOD数据的标签为-1，跳过损失和准确率计算
