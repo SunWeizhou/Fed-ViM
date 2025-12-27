@@ -6,13 +6,17 @@ from typing import List, Dict, Any
 
 class FLServer:
     # 修改初始化，接收 foogd_module
-    def __init__(self, global_model, foogd_module, device): 
+    def __init__(self, global_model, foogd_module, device):
         self.global_model = global_model
         self.foogd_module = foogd_module # 新增
         self.device = device
         self.global_model.to(device)
         if self.foogd_module:
             self.foogd_module.to(device)
+
+        # [新增] 存储全局统计量 (Fed-ViM)
+        self.P_global = None
+        self.mu_global = None
 
     def get_global_parameters(self):
         """获取全局参数 (Model + FOOGD) - 修复版"""
@@ -93,6 +97,60 @@ class FLServer:
                 aggregated_params[key] += param_data * weight
 
         return aggregated_params
+
+    # [新增] 核心 PCA 更新逻辑 (Fed-ViM)
+    def update_global_subspace(self, client_stats_list, k=64):
+        """
+        基于充分统计量重构全局协方差并提取子空间
+        Args:
+            client_stats_list: 客户端上传的统计量列表
+            k: 子空间保留维度 (建议 32-64)
+        """
+        if not client_stats_list:
+            return {'P': None, 'mu': None}
+
+        print("  [Server] Updating Global Subspace (PCA)...")
+
+        # 1. 聚合统计量
+        total_count = sum([s['count'] for s in client_stats_list])
+        if total_count == 0: return {'P': None, 'mu': None}
+
+        feature_dim = client_stats_list[0]['sum_z'].shape[0]
+        global_sum_z = torch.zeros(feature_dim).to(self.device)
+        global_sum_zzT = torch.zeros(feature_dim, feature_dim).to(self.device)
+
+        for s in client_stats_list:
+            global_sum_z += s['sum_z']
+            global_sum_zzT += s['sum_zzT']
+
+        # 2. 重构均值和协方差
+        # mu = E[Z]
+        self.mu_global = global_sum_z / total_count
+
+        # E[ZZ^T]
+        E_zzT = global_sum_zzT / total_count
+
+        # Cov = E[ZZ^T] - mu * mu^T (利用方差分解公式)
+        cov_global = E_zzT - torch.outer(self.mu_global, self.mu_global)
+
+        # 3. 特征分解 (SVD)
+        # 添加微小扰动防止数值不稳定
+        cov_global += torch.eye(feature_dim).to(self.device) * 1e-6
+
+        try:
+            # torch.linalg.eigh 适用于对称矩阵，比 svd 快且稳
+            eig_vals, eig_vecs = torch.linalg.eigh(cov_global)
+
+            # eigh 返回的是特征值升序排列，我们需要最大的前 k 个
+            # 取最后 k 个 -> 反转顺序
+            self.P_global = eig_vecs[:, -k:]
+
+            print(f"  [Server] PCA Done. Subspace shape: {self.P_global.shape}")
+
+        except Exception as e:
+            print(f"  [Server] PCA Failed: {e}")
+
+        return {'P': self.P_global, 'mu': self.mu_global}
 
     def _compute_scores_and_metrics(self, data_loader):
         """

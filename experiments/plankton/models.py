@@ -98,6 +98,42 @@ class FedAvg_Model(nn.Module):
         return logits, features
 
 
+class GSALoss(nn.Module):
+    """
+    Global Subspace Alignment Loss (GSA Loss)
+    计算特征在全局子空间 P 之外的投影残差范数
+    """
+    def __init__(self):
+        super(GSALoss, self).__init__()
+
+    def forward(self, features, P_global, mu_global):
+        """
+        Args:
+            features: [Batch, Feature_Dim] 本地特征
+            P_global: [Feature_Dim, k] 全局子空间正交基 (需 detach)
+            mu_global: [Feature_Dim] 全局均值 (需 detach)
+        """
+        # 1. 梯度阻断：确保不计算全局参数的梯度
+        P = P_global.detach()
+        mu = mu_global.detach()
+
+        # 2. 中心化: z - mu
+        z_centered = features - mu
+
+        # 3. 投影计算:
+        # 投影系数 coeffs = (z - mu) @ P
+        z_projected_coeffs = torch.matmul(z_centered, P)
+        # 重构 z_recon = coeffs @ P.T
+        z_reconstructed = torch.matmul(z_projected_coeffs, P.T)
+
+        # 4. 计算残差向量: diff = (z - mu) - z_recon
+        diff = z_centered - z_reconstructed
+
+        # 5. Loss = 残差的 L2 范数 (平均值)
+        loss = torch.norm(diff, p=2, dim=1).mean()
+        return loss
+
+
 class ScoreModel(nn.Module):
     """评分模型 - 用于SM3D OOD检测"""
 

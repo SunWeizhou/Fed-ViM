@@ -17,7 +17,7 @@ class FLClient:
     """联邦学习客户端"""
 
     def __init__(self, client_id, model, foogd_module, train_loader, device,
-                 compute_aug_features=True, freeze_bn=True, base_lr=0.001):
+                 compute_aug_features=True, freeze_bn=True, base_lr=0.001, use_fedvim=False):
         self.client_id = client_id
         self.model = model
         self.foogd_module = foogd_module
@@ -26,6 +26,12 @@ class FLClient:
         self.compute_aug_features = compute_aug_features
         self.freeze_bn = freeze_bn
         self.base_lr = base_lr  # 基础学习率，可根据 batch_size 调整
+        self.use_fedvim = use_fedvim
+
+        # 如果使用 Fed-ViM，初始化 GSA Loss
+        if self.use_fedvim:
+            from models import GSALoss
+            self.gsa_criterion = GSALoss()
 
         # 在初始化时定义优化器 (只做一次)
         self.optimizer_main = torch.optim.SGD(
@@ -85,7 +91,7 @@ class FLClient:
         return images
 
     # [修正2] 接收 current_round 参数并实现 Sigmoid Warm-up
-    def train_step(self, local_epochs=1, current_round=0):
+    def train_step(self, local_epochs=1, current_round=0, global_stats=None):
         # =================================================================
         # 【优化】: 不再每次重新创建优化器，只调整学习率
         # 这样可以保留优化器的状态（如 momentum），同时确保学习率正确
@@ -115,7 +121,11 @@ class FLClient:
 
         total_loss = 0.0
         total_samples = 0
-        epoch_log = {'cls': 0.0, 'ksd': 0.0, 'sm': 0.0}
+        epoch_log = {'cls': 0.0, 'ksd': 0.0, 'sm': 0.0, 'gsa': 0.0}
+
+        # --- 解析全局统计量 (Fed-ViM) ---
+        P_global = global_stats.get('P') if global_stats else None
+        mu_global = global_stats.get('mu') if global_stats else None
 
         # --- 智能动态权重 (Sigmoid Warm-up) ---
         if self.foogd_module:
@@ -168,6 +178,8 @@ class FLClient:
                     sm_loss = torch.tensor(0.0, device=self.device)
                     sm_loss_val = 0.0
                     loss_for_foogd = torch.tensor(0.0, device=self.device)
+                    gsa_loss = torch.tensor(0.0, device=self.device)
+                    gsa_loss_val = 0.0
 
                     if self.foogd_module:
                         ksd_loss, sm_loss, _ = self.foogd_module(features_norm, features_aug_norm)
@@ -175,8 +187,22 @@ class FLClient:
                         sm_loss_val = sm_loss.item()
                         loss_for_foogd = sm_loss
 
+                    # --- [修改] Fed-ViM GSA Loss ---
+                    # 只有当启用了 Fed-ViM 且 服务端已经下发了 P (即非第一轮) 时才计算
+                    if self.use_fedvim and P_global is not None:
+                        # 1. 约束原始特征 (保证 ID 数据在子空间内)
+                        loss_clean = self.gsa_criterion(features, P_global, mu_global)
+
+                        # 2. 约束增强特征 (强迫模型对风格变化鲁棒，核心！)
+                        loss_aug = self.gsa_criterion(features_aug, P_global, mu_global)
+
+                        # 3. 总 GSA Loss (取平均)
+                        gsa_loss = 0.5 * loss_clean + 0.5 * loss_aug
+                        gsa_loss_val = gsa_loss.item()
+
                     # 应用动态权重
-                    loss_for_main = classification_loss + effective_lambda_ksd * ksd_loss
+                    lambda_gsa = 1.0  # Fed-ViM 权重
+                    loss_for_main = classification_loss + lambda_gsa * gsa_loss + effective_lambda_ksd * ksd_loss
 
                 # [修正3] 删除 retain_graph=True，释放显存
                 self.scaler.scale(loss_for_main).backward()
@@ -194,24 +220,32 @@ class FLClient:
 
                 batch_size = data.size(0)
                 # [修复] 统一使用标量值进行统计计算
-                total_batch_loss = classification_loss.item() + effective_lambda_ksd * ksd_loss_val
+                total_batch_loss = classification_loss.item() + lambda_gsa * gsa_loss_val + effective_lambda_ksd * ksd_loss_val
                 total_loss += total_batch_loss * batch_size
                 total_samples += batch_size
                 epoch_log['cls'] += classification_loss.item() * batch_size
                 epoch_log['ksd'] += ksd_loss_val * batch_size
                 epoch_log['sm'] += sm_loss_val * batch_size
+                epoch_log['gsa'] += gsa_loss_val * batch_size
 
         if total_samples > 0:
             # 计算平均损失并打印
             avg_cls = epoch_log['cls'] / total_samples
             avg_ksd = epoch_log['ksd'] / total_samples
             avg_sm = epoch_log['sm'] / total_samples
+            avg_gsa = epoch_log['gsa'] / total_samples
             print(f"Client {self.client_id} - Epochs {local_epochs} - Avg Loss: {total_loss / total_samples:.4f} | "
-                  f"Cls: {avg_cls:.4f}, KSD: {avg_ksd:.6f}, SM: {avg_sm:.6f}")
+                  f"Cls: {avg_cls:.4f}, KSD: {avg_ksd:.6f}, SM: {avg_sm:.6f}, GSA: {avg_gsa:.4f}")
+
+        # --- [新增] 计算并返回统计量 ---
+        client_vim_stats = None
+        if self.use_fedvim:
+            client_vim_stats = self._compute_local_statistics()
 
         avg_loss = total_loss / total_samples if total_samples > 0 else 0.0
         generic_params = self.get_generic_parameters()
-        return generic_params, avg_loss
+        # [修改] 返回值增加 client_vim_stats
+        return generic_params, avg_loss, client_vim_stats
 
     def get_generic_parameters(self):
         params = {}
@@ -292,4 +326,30 @@ class FLClient:
                 all_labels.extend(targets.cpu().numpy())
 
         return all_ood_scores, all_labels
+
+    def _compute_local_statistics(self):
+        """[新增] Fed-ViM: 计算本地二阶统计量 (显存优化版)"""
+        self.model.eval()
+        # 获取特征维度 (DenseNet121=1024, 169=1664)
+        feature_dim = self.model.backbone.feature_dim
+
+        sum_z = torch.zeros(feature_dim).to(self.device)
+        sum_zzT = torch.zeros(feature_dim, feature_dim).to(self.device)
+        count = 0
+
+        with torch.no_grad():
+            for data, _ in self.train_loader:
+                data = data.to(self.device)
+                _, features = self.model(data)  # 获取特征
+
+                # 1. 累加一阶矩 sum(z)
+                sum_z += features.sum(dim=0)
+
+                # 2. 累加二阶矩 sum(zz^T)
+                # 使用矩阵乘法技巧 features.T @ features 避免生成 (B, D, D) 的大张量
+                sum_zzT += torch.matmul(features.T, features)
+
+                count += features.size(0)
+
+        return {'sum_z': sum_z, 'sum_zzT': sum_zzT, 'count': count}
 

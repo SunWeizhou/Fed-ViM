@@ -124,7 +124,7 @@ def setup_experiment(args):
 
 import copy # 确保引入 copy
 
-def create_clients(n_clients, model_template, foogd_template, client_loaders, device, model_type='densenet169', compute_aug_features=True, freeze_bn=True, base_lr=0.001):
+def create_clients(n_clients, model_template, foogd_template, client_loaders, device, model_type='densenet169', compute_aug_features=True, freeze_bn=True, base_lr=0.001, use_fedvim=False):
     """创建客户端 (修正版)"""
     clients = []
     # 注意：compute_aug_features 和 freeze_bn 参数目前未被使用
@@ -156,7 +156,7 @@ def create_clients(n_clients, model_template, foogd_template, client_loaders, de
             compute_aug_features=compute_aug_features,
             freeze_bn=freeze_bn,
             base_lr=base_lr,  # 传递基础学习率
-            algorithm=algorithm,  # 传递算法选择
+            use_fedvim=use_fedvim  # [新增] 传递 Fed-ViM 开关
         )
         clients.append(client)
 
@@ -265,6 +265,7 @@ def federated_training(args):
         compute_aug_features=args.compute_aug_features,
         freeze_bn=args.freeze_bn,
         base_lr=args.base_lr if hasattr(args, 'base_lr') else 0.001,  # 使用参数或默认值
+        use_fedvim=args.use_fedvim  # [新增] 传递 Fed-ViM 开关
     )
 
     if saved_client_states is not None:
@@ -313,6 +314,7 @@ def federated_training(args):
         training_history = {
             'rounds': [],
             'train_losses': [],
+            'test_accuracies': [],     # [修复] 添加缺失的键
             'test_losses': [],
             'tail_accuracies': [],      # 尾部类别准确率
             'hierarchical_errors': [],  # 层级错误
@@ -324,6 +326,9 @@ def federated_training(args):
 
     # 联邦学习训练循环
     print(f"\n开始联邦学习训练，从第 {start_round + 1} 轮 到 {args.communication_rounds} 轮...")
+
+    # [新增] 初始化全局统计量容器 (Fed-ViM)
+    global_vim_stats = {'P': None, 'mu': None}
 
     for round_num in range(start_round, args.communication_rounds):
         print(f"\n=== 通信轮次 {round_num + 1}/{args.communication_rounds} ===")
@@ -342,6 +347,7 @@ def federated_training(args):
         # 客户端本地训练
         client_updates = []
         client_sample_sizes = []
+        client_vim_stats_list = []  # [新增] 收集本轮统计量
         round_train_loss = 0.0
 
         for client_id in selected_clients:
@@ -350,21 +356,31 @@ def federated_training(args):
             # 设置客户端模型参数
             client.set_generic_parameters(server.get_global_parameters())
 
-            # 客户端本地训练 (传入当前轮次用于动态权重调度)
-            client_update, client_loss = client.train_step(
+            # [修改] 客户端本地训练，传入 global_stats 并接收 client_stats
+            # 注意：client.train_step 现在的返回值变成了 3 个
+            client_update, client_loss, client_stats = client.train_step(
                 local_epochs=args.local_epochs,
-                current_round=round_num  # 新增参数：当前轮次
+                current_round=round_num,  # 新增参数：当前轮次
+                global_stats=global_vim_stats  # [新增] 下发 P 和 mu
             )
 
             client_updates.append(client_update)
             client_sample_sizes.append(len(client.train_loader.dataset))
             round_train_loss += client_loss
 
+            # [新增] 收集 Fed-ViM 统计量
+            if args.use_fedvim and client_stats is not None:
+                client_vim_stats_list.append(client_stats)
             print(f"  客户端 {client_id}: 本地损失 = {client_loss:.4f}")
 
         # 服务器聚合
         aggregated_params = server.aggregate(client_updates, client_sample_sizes)
         server.set_global_parameters(aggregated_params)
+
+        # [新增] 服务端更新全局子空间 (Fed-ViM)
+        if args.use_fedvim and len(client_vim_stats_list) > 0:
+            # 建议 k 值设为 32 或 64 (DenseNet 特征维度高，但浮游生物类别少，维度不用太高)
+            global_vim_stats = server.update_global_subspace(client_vim_stats_list, k=64)
 
         # 更新客户端模型 (为下一轮做准备)
         for client in clients:
@@ -607,6 +623,8 @@ def main():
                        help='骨干网络类型')
     parser.add_argument('--use_foogd', action='store_true', default=False,
                        help='是否使用FOOGD模块')
+    parser.add_argument('--use_fedvim', action='store_true', default=False,
+                       help='是否使用 Fed-ViM (GSA Loss + PCA)')
     parser.add_argument('--image_size', type=int, default=224,
                        help='输入图像尺寸')
 
