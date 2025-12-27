@@ -500,8 +500,8 @@ def main():
                        help='是否从最新检查点恢复训练')  # [新增]
     parser.add_argument('--compute_aug_features', action='store_true', default=True,
                        help='是否计算增强数据的特征（显存不足时可设为False）')
-    parser.add_argument('--freeze_bn', action='store_true', default=True,
-                       help='是否冻结BN统计量（默认True，使用预训练ImageNet统计量）')
+    parser.add_argument('--freeze_bn', type=int, default=1,
+                       help='是否冻结BN统计量 (1=True, 0=False)。FedViM建议设为0，FOOGD建议设为1')
     parser.add_argument('--base_lr', type=float, default=0.001,
                        help='基础学习率（默认0.001，batch_size=64时可尝试0.01）')
 

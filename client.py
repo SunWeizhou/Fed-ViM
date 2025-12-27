@@ -188,8 +188,9 @@ class FLClient:
                         loss_for_foogd = sm_loss
 
                     # --- [修改] Fed-ViM GSA Loss ---
-                    # 只有当启用了 Fed-ViM 且 服务端已经下发了 P (即非第一轮) 时才计算
-                    if self.use_fedvim and P_global is not None:
+                    # Warm-up 机制: 前 10 轮专注学习分类,等特征稳定后再引入子空间约束
+                    warmup_rounds = 10
+                    if self.use_fedvim and P_global is not None and current_round > warmup_rounds:
                         # 1. 约束原始特征 (保证 ID 数据在子空间内)
                         loss_clean = self.gsa_criterion(features, P_global, mu_global)
 
@@ -199,6 +200,13 @@ class FLClient:
                         # 3. 总 GSA Loss (取平均)
                         gsa_loss = 0.5 * loss_clean + 0.5 * loss_aug
                         gsa_loss_val = gsa_loss.item()
+
+                        # 在 GSA 激活的第一轮打印提示
+                        if batch_idx == 0 and epoch == 0:
+                            print(f"  [Round {current_round}] GSA Loss Activated!")
+                    else:
+                        # Warm-up 阶段或不使用 Fed-ViM 时,GSA Loss 为 0
+                        gsa_loss_val = 0.0
 
                     # 应用动态权重
                     lambda_gsa = 1.0  # Fed-ViM 权重
