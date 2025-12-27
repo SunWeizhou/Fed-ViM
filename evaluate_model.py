@@ -99,18 +99,68 @@ def evaluate_classification(model, test_loader, device, class_names=None):
     return accuracy, cm
 
 
-def plot_confusion_matrix(cm, class_names, output_path):
-    """绘制混淆矩阵"""
-    plt.figure(figsize=(20, 18))
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
-                xticklabels=class_names, yticklabels=class_names)
-    plt.xlabel('Predicted Label', fontsize=12)
-    plt.ylabel('True Label', fontsize=12)
-    plt.title('Confusion Matrix', fontsize=14, fontweight='bold')
+def plot_confusion_matrix(cm, class_names, output_path, normalize=True, mask_diagonal=False):
+    """
+    绘制科研级混淆矩阵 (针对多类别优化)
+
+    Args:
+        cm: 原始混淆矩阵 (numpy array)
+        class_names: 类别名称列表
+        output_path: 保存路径
+        normalize: 是否按行归一化 (显示 Recall)
+        mask_diagonal: 是否屏蔽对角线 (高亮显示错误)
+    """
+    # 1. 归一化处理
+    if normalize:
+        # 加上 epsilon 防止除零
+        cm_norm = cm.astype('float') / (cm.sum(axis=1)[:, np.newaxis] + 1e-8)
+        title = 'Normalized Confusion Matrix (Recall)'
+        fmt = '.2f' # 显示两位小数
+    else:
+        cm_norm = cm
+        title = 'Confusion Matrix (Raw Counts)'
+        fmt = 'd'
+
+    # 2. 对角线屏蔽 (用于发现 Error Pattern)
+    if mask_diagonal:
+        # 创建一个掩码，只显示非对角线元素
+        cm_plot = cm_norm.copy()
+        np.fill_diagonal(cm_plot, 0)
+        title += ' - Diagonal Masked (Errors Highlighted)'
+        # vmax 设置为非对角线最大值的 1.2 倍，保证对比度
+        vmax = np.max(cm_plot) * 1.2 if np.max(cm_plot) > 0 else 1.0
+    else:
+        cm_plot = cm_norm
+        vmax = 1.0
+
+    # 3. 绘图
+    plt.figure(figsize=(24, 20))
+
+    # 智能标注: 只有当数值 > 阈值时才显示数字，防止密密麻麻
+    threshold = 0.01 if normalize else 0
+    annot_array = cm_plot.copy()
+    annot_array[annot_array <= threshold] = np.nan  # 小值不显示
+
+    sns.heatmap(cm_plot, annot=annot_array if normalize else cm_plot,
+                fmt=fmt, cmap='Reds',
+                xticklabels=class_names, yticklabels=class_names,
+                vmax=vmax, cbar_kws={'label': 'Recall / Probability'},
+                linewidths=0.5, linecolor='gray')
+
+    plt.xlabel('Predicted Label', fontsize=16, fontweight='bold')
+    plt.ylabel('True Label', fontsize=16, fontweight='bold')
+    plt.title(title, fontsize=20, fontweight='bold')
+
+    # 旋转轴标签，防止重叠
+    plt.xticks(rotation=90, fontsize=9)
+    plt.yticks(rotation=0, fontsize=9)
+
     plt.tight_layout()
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close()
     print(f"\n混淆矩阵已保存: {output_path}")
+    if mask_diagonal:
+        print(f"  提示: 对角线已屏蔽,红色高亮显示主要错误分类")
 
 
 def compute_energy_scores(logits):
@@ -296,6 +346,155 @@ def plot_ood_distribution(id_scores, ood_scores, method_name, output_path):
     print(f"OOD 分布图已保存: {output_path}")
 
 
+def plot_top_confusion_pairs(cm, class_names, output_path, top_k=20):
+    """
+    绘制最容易混淆的 Top-K 类别对
+
+    Args:
+        cm: 混淆矩阵
+        class_names: 类别名称列表
+        output_path: 保存路径
+        top_k: 显示前 K 个最易混淆的对
+    """
+    # 归一化
+    cm_norm = cm.astype('float') / (cm.sum(axis=1)[:, np.newaxis] + 1e-8)
+
+    # 将矩阵展平为 (True, Pred, Value) 的列表
+    confusions = []
+    for i in range(len(class_names)):
+        for j in range(len(class_names)):
+            if i != j:  # 忽略对角线
+                confusions.append({
+                    'True Class': class_names[i],
+                    'Predicted Class': class_names[j],
+                    'Error Rate': cm_norm[i, j],
+                    'Raw Count': cm[i, j]
+                })
+
+    # 转为 DataFrame 并排序
+    import pandas as pd
+    df = pd.DataFrame(confusions)
+    df = df.sort_values('Error Rate', ascending=False).head(top_k)
+
+    # 绘图
+    plt.figure(figsize=(14, 8))
+    # 创建标签: "True -> Pred"
+    df['Label'] = df.apply(lambda x: f"{x['True Class']} → {x['Predicted Class']}", axis=1)
+
+    bars = plt.bar(range(len(df)), df['Error Rate'], color='#ff7f0e', alpha=0.8, edgecolor='black', linewidth=1.2)
+
+    plt.ylabel('Error Rate (Recall Loss)', fontsize=13, fontweight='bold')
+    plt.title(f'Top {top_k} Most Confused Class Pairs', fontsize=15, fontweight='bold')
+    plt.xticks(range(len(df)), df['Label'].values, rotation=45, ha='right', fontsize=10)
+    plt.grid(axis='y', linestyle='--', alpha=0.3)
+    plt.xlabel('True Class → Predicted Class', fontsize=12, fontweight='bold')
+
+    # 在柱子上标数值
+    for i, bar in enumerate(bars):
+        height = bar.get_height()
+        plt.text(bar.get_x() + bar.get_width()/2., height,
+                 f'{height:.1%}', ha='center', va='bottom', fontsize=9, fontweight='bold')
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=200, bbox_inches='tight')
+    plt.close()
+    print(f"Top-{top_k} 混淆对分析图已保存: {output_path}")
+
+
+def plot_tsne_feature_space(model, id_loader, ood_loader, device, output_path, max_samples=2000):
+    """
+    绘制 ID vs OOD 的 t-SNE 特征分布图
+
+    Args:
+        model: 训练好的模型
+        id_loader: ID 数据加载器
+        ood_loader: OOD 数据加载器
+        device: 计算设备
+        output_path: 保存路径
+        max_samples: 最大样本数 (防止计算过慢)
+    """
+    from sklearn.manifold import TSNE
+
+    model.eval()
+    features_list = []
+    labels_list = []  # 0 for ID, 1 for OOD
+
+    print("\n正在收集特征用于 t-SNE 可视化...")
+
+    # 1. 收集 ID 特征
+    with torch.no_grad():
+        count = 0
+        for data, _ in id_loader:
+            data = data.to(device)
+            _, feats = model(data)
+            features_list.append(feats.cpu().numpy())
+            labels_list.append(np.zeros(len(feats)))
+            count += len(feats)
+            if count > max_samples // 2:
+                break
+
+    # 2. 收集 OOD 特征
+    with torch.no_grad():
+        count = 0
+        for data, _ in ood_loader:
+            data = data.to(device)
+            _, feats = model(data)
+            features_list.append(feats.cpu().numpy())
+            labels_list.append(np.ones(len(feats)))
+            count += len(feats)
+            if count > max_samples // 2:
+                break
+
+    X = np.concatenate(features_list)
+    y = np.concatenate(labels_list)
+
+    print(f"  - ID 样本: {np.sum(y==0)}")
+    print(f"  - OOD 样本: {np.sum(y==1)}")
+    print(f"  - 特征维度: {X.shape[1]}")
+
+    # 3. t-SNE 降维
+    print("\n正在计算 t-SNE (这可能需要几分钟)...")
+    tsne = TSNE(n_components=2, random_state=42, init='pca', learning_rate='auto',
+                perplexity=min(30, len(X) // 4))  # 自适应调整 perplexity
+    X_embedded = tsne.fit_transform(X)
+
+    print("  t-SNE 计算完成!")
+
+    # 4. 绘图
+    plt.figure(figsize=(12, 10))
+
+    # ID 数据 (蓝色)
+    id_mask = y == 0
+    plt.scatter(X_embedded[id_mask, 0], X_embedded[id_mask, 1],
+               c='blue', alpha=0.5, s=15, label='In-Distribution (ID)', edgecolors='none')
+
+    # OOD 数据 (红色)
+    ood_mask = y == 1
+    plt.scatter(X_embedded[ood_mask, 0], X_embedded[ood_mask, 1],
+               c='red', alpha=0.5, s=15, label='Out-of-Distribution (OOD)', edgecolors='none')
+
+    plt.legend(fontsize=12, markerscale=2)
+    plt.title('t-SNE Feature Space Visualization\n(ID vs OOD Separability)',
+              fontsize=15, fontweight='bold')
+    plt.xlabel('t-SNE Dimension 1', fontsize=12)
+    plt.ylabel('t-SNE Dimension 2', fontsize=12)
+    plt.grid(alpha=0.2)
+
+    # 添加说明
+    plt.text(0.02, 0.98,
+             f"ID (blue, n={np.sum(id_mask)}): {np.sum(y==0)} samples\n"
+             f"OOD (red, n={np.sum(ood_mask)}): {np.sum(y==1)} samples\n"
+             f"Feature dim: {X.shape[1]} → t-SNE (2D)",
+             transform=plt.gca().transAxes,
+             fontsize=10, verticalalignment='top',
+             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=200, bbox_inches='tight')
+    plt.close()
+    print(f"t-SNE 特征空间可视化已保存: {output_path}")
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description='评估训练好的模型')
@@ -309,6 +508,10 @@ def main():
                        help='GPU ID')
     parser.add_argument('--output_dir', type=str, default=None,
                        help='结果输出目录 (默认与检查点同目录)')
+    parser.add_argument('--enable_tsne', action='store_true', default=False,
+                       help='是否启用 t-SNE 特征空间可视化 (耗时较长)')
+    parser.add_argument('--tsne_samples', type=int, default=2000,
+                       help='t-SNE 使用的最大样本数 (默认: 2000)')
 
     args = parser.parse_args()
 
@@ -364,13 +567,31 @@ def main():
     output_dir = args.output_dir if args.output_dir else checkpoint_dir
     os.makedirs(output_dir, exist_ok=True)
 
-    # 保存混淆矩阵
-    cm_path = os.path.join(output_dir, 'confusion_matrix.png')
-    plot_confusion_matrix(cm, class_names, cm_path)
+    print("\n" + "="*60)
+    print("生成可视化结果")
+    print("="*60)
 
-    # 保存 OOD 分布图
+    # 1. 保存标准混淆矩阵 (归一化)
+    cm_path = os.path.join(output_dir, 'confusion_matrix_normalized.png')
+    plot_confusion_matrix(cm, class_names, cm_path, normalize=True, mask_diagonal=False)
+
+    # 2. 保存错误高亮混淆矩阵 (对角线屏蔽)
+    cm_masked_path = os.path.join(output_dir, 'confusion_matrix_errors_highlighted.png')
+    plot_confusion_matrix(cm, class_names, cm_masked_path, normalize=True, mask_diagonal=True)
+
+    # 3. 保存 Top-K 混淆对分析
+    topk_path = os.path.join(output_dir, 'top_confusion_pairs.png')
+    plot_top_confusion_pairs(cm, class_names, topk_path, top_k=20)
+
+    # 4. 保存 OOD 分布图
     ood_plot_path = os.path.join(output_dir, f'ood_distribution.png')
     plot_ood_distribution(id_scores, ood_scores, method_name, ood_plot_path)
+
+    # 5. t-SNE 特征空间可视化 (可选,耗时较长)
+    if args.enable_tsne:
+        tsne_path = os.path.join(output_dir, 'tsne_feature_space.png')
+        plot_tsne_feature_space(model, id_loader, ood_loader, device, tsne_path,
+                               max_samples=args.tsne_samples)
 
     # 保存评估结果摘要
     summary_path = os.path.join(output_dir, 'evaluation_summary.txt')
@@ -396,9 +617,14 @@ def main():
     print(f"评估完成!")
     print(f"{'='*60}")
     print(f"\n评估结果已保存到: {output_dir}")
-    print(f"  - 混淆矩阵: {cm_path}")
-    print(f"  - OOD 分布图: {ood_plot_path}")
-    print(f"  - 评估摘要: {summary_path}")
+    print(f"  1. 归一化混淆矩阵: {os.path.basename(cm_path)}")
+    print(f"  2. 错误高亮混淆矩阵: {os.path.basename(cm_masked_path)}")
+    print(f"  3. Top-20 混淆对分析: {os.path.basename(topk_path)}")
+    print(f"  4. OOD 分数分布: {os.path.basename(ood_plot_path)}")
+    if args.enable_tsne:
+        print(f"  5. t-SNE 特征空间: {os.path.basename(tsne_path)}")
+    print(f"  6. 评估摘要: {os.path.basename(summary_path)}")
+    print(f"\n提示: 查看 '{os.path.basename(cm_masked_path)}' 可以快速定位主要错误分类")
 
 
 if __name__ == '__main__':
