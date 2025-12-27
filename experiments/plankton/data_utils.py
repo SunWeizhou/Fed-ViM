@@ -490,6 +490,3 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"数据加载测试失败: {e}")
         print("请确保数据集已正确划分并放置在指定目录")
-
-
-    return M/5.0  # 归一化到 [0,1] 范围
