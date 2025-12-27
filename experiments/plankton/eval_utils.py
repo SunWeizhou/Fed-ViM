@@ -1,0 +1,517 @@
+#!/usr/bin/env python3
+"""
+评估工具模块
+用于评估pFL-FOOGD模型的性能
+
+作者: Claude Code
+日期: 2025-11-22
+"""
+
+import os
+import torch
+import numpy as np
+from sklearn.metrics import (
+    roc_auc_score, roc_curve, precision_recall_curve,
+    average_precision_score, accuracy_score, confusion_matrix
+)
+import matplotlib.pyplot as plt
+import seaborn as sns
+from typing import Dict, List, Tuple
+import torch.nn.functional as F
+
+def get_tail_classes(train_dataset, threshold_ratio=0.5):
+    """
+    根据训练集统计，识别尾部类别 (样本数最少的 50% 类别)
+    返回: 尾部类别的索引列表
+
+    Args:
+        train_dataset: 训练数据集，需要包含 labels 属性
+        threshold_ratio: 尾部类别比例，默认为 0.5 (50%)
+
+    Returns:
+        set: 尾部类别的索引集合
+    """
+    # 统计每个类别的样本数
+    targets = np.array(train_dataset.labels)
+    class_counts = {}
+    for t in targets:
+        class_counts[t] = class_counts.get(t, 0) + 1
+
+    # 按样本数排序
+    sorted_classes = sorted(class_counts.items(), key=lambda x: x[1])
+
+    # 取样本数最少的前 threshold_ratio 比例作为尾部类别
+    n_tail = int(len(sorted_classes) * threshold_ratio)
+    tail_classes = [c[0] for c in sorted_classes[:n_tail]]
+
+    return set(tail_classes)
+
+
+
+
+def evaluate_accuracy_metrics(model, dataloader, tail_classes_set, device):
+    """
+    计算 ID Acc, Tail Acc
+
+    Args:
+        model: 模型
+        dataloader: 数据加载器
+        tail_classes_set: 尾部类别集合
+        device: 设备
+
+    Returns:
+        tuple: (id_acc, tail_acc)
+    """
+    model.eval()
+    correct = 0
+    total = 0
+
+    # 尾部类别统计
+    tail_correct = 0
+    tail_total = 0
+
+    with torch.no_grad():
+        for inputs, labels in dataloader:
+            inputs, labels = inputs.to(device), labels.to(device)
+
+            # FedAvg 模型返回 (logits, features)
+            outputs = model(inputs)
+            if isinstance(outputs, tuple):
+                logits = outputs[0]
+            else:
+                logits = outputs
+
+            _, predicted = torch.max(logits.data, 1)
+
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+
+            # 计算尾部精度
+            for p, t in zip(predicted, labels):
+                if t.item() in tail_classes_set:
+                    tail_total += 1
+                    if p == t:
+                        tail_correct += 1
+
+    # 1. ID Accuracy
+    id_acc = correct / total if total > 0 else 0.0
+
+    # 2. Tail Accuracy
+    tail_acc = tail_correct / tail_total if tail_total > 0 else 0.0
+
+    return id_acc, tail_acc
+
+
+
+def evaluate_id_performance(model, data_loader, device, num_classes=54):
+    """
+    评估ID数据上的分类性能
+
+    Args:
+        model: 模型
+        data_loader: 数据加载器
+        device: 设备
+        num_classes: 类别数量
+
+    Returns:
+        metrics: 评估指标字典
+    """
+    model.eval()
+    total_loss = 0.0
+    total_samples = 0
+    all_preds = []
+    all_targets = []
+    all_logits = []
+
+    with torch.no_grad():
+        for data, targets in data_loader:
+            data, targets = data.to(device), targets.to(device)
+
+            logits, _ = model(data)
+
+            # 计算 Loss
+            valid_mask = targets >= 0
+            if valid_mask.any():
+                valid_targets = targets[valid_mask]
+                valid_logits = logits[valid_mask]
+                loss = F.cross_entropy(valid_logits, valid_targets)
+                total_loss += loss.item() * valid_targets.size(0)
+                total_samples += valid_targets.size(0)
+
+                # 预测
+                _, preds = torch.max(valid_logits, 1)
+
+                all_preds.extend(preds.cpu().numpy())
+                all_targets.extend(valid_targets.cpu().numpy())
+                all_logits.extend(valid_logits.cpu().numpy())
+
+    all_preds = np.array(all_preds)
+    all_targets = np.array(all_targets)
+    all_logits = np.array(all_logits)
+
+    # 计算指标
+    accuracy = accuracy_score(all_targets, all_preds)
+
+    # 计算每个类别的准确率和样本数量
+    class_accuracy = {}
+    class_sample_counts = {}
+    for class_idx in range(num_classes):
+        class_mask = all_targets == class_idx
+        class_count = np.sum(class_mask)
+        class_sample_counts[class_idx] = class_count
+        if class_count > 0:
+            class_acc = accuracy_score(all_targets[class_mask], all_preds[class_mask])
+            class_accuracy[class_idx] = class_acc
+
+    # 计算混淆矩阵
+    cm = confusion_matrix(all_targets, all_preds, labels=range(num_classes))
+
+    metrics = {
+        'accuracy': accuracy,
+        'class_accuracy': class_accuracy,
+        'class_sample_counts': class_sample_counts,
+        'confusion_matrix': cm,
+        'predictions': all_preds,
+        'targets': all_targets,
+        'logits': all_logits,
+        'loss': total_loss / total_samples if total_samples > 0 else 0
+    }
+
+    return metrics
+
+
+def evaluate_ood_detection(model, foogd_module, id_loader, ood_loader, device):
+    """
+    评估OOD检测性能
+
+    Args:
+        model: 模型
+        foogd_module: FOOGD模块
+        id_loader: ID数据加载器
+        ood_loader: OOD数据加载器
+        device: 设备
+        (Note: FedAvg架构使用单一分类器的特征进行OOD检测)
+
+    Returns:
+        metrics: OOD检测指标字典
+    """
+    model.eval()
+    if foogd_module:
+        foogd_module.eval()
+
+    # 收集ID和OOD分数
+    id_scores = compute_ood_scores(model, foogd_module, id_loader, device, use_head_g)
+    ood_scores = compute_ood_scores(model, foogd_module, ood_loader, device, use_head_g)
+
+    # 合并分数和标签
+    scores = np.concatenate([id_scores, ood_scores])
+    labels = np.concatenate([np.zeros_like(id_scores), np.ones_like(ood_scores)])
+
+    # 计算OOD检测指标
+    auroc = roc_auc_score(labels, scores)
+
+    # 计算AUPR
+    aupr_in = average_precision_score(labels, scores)
+    aupr_out = average_precision_score(1 - labels, -scores)
+
+    # 计算FPR@95
+    fpr, tpr, thresholds = roc_curve(labels, scores)
+    tpr_target = 0.95
+    idx = np.argmin(np.abs(tpr - tpr_target))
+    fpr95 = fpr[idx]
+
+    # 计算检测错误率
+    detection_error = compute_detection_error(labels, scores)
+
+    metrics = {
+        'auroc': auroc,
+        'aupr_in': aupr_in,
+        'aupr_out': aupr_out,
+        'fpr95': fpr95,
+        'detection_error': detection_error,
+        'id_scores': id_scores,
+        'ood_scores': ood_scores,
+        'labels': labels
+    }
+
+    return metrics
+
+
+def compute_ood_scores(model, foogd_module, data_loader, device):
+    """
+    计算OOD分数
+
+    Args:
+        model: 模型
+        foogd_module: FOOGD模块
+        data_loader: 数据加载器
+        device: 设备
+
+    Returns:
+        ood_scores: OOD分数数组
+    """
+    all_scores = []
+
+    with torch.no_grad():
+        for data, _ in data_loader:
+            data = data.to(device)
+
+            # 获取模型输出 - FedAvg架构返回 (logits, features)
+            outputs = model(data)
+
+            if isinstance(outputs, tuple):
+                # 取第一个元素作为 logits，第二个作为 features
+                features = outputs[1] if len(outputs) > 1 else outputs[0]
+            else:
+                features = outputs
+
+            if foogd_module:
+                # [修正] 必须先归一化，与训练时保持一致！
+                features_norm = F.normalize(features, p=2, dim=1)
+                # 使用归一化后的特征计算分数
+                _, _, scores = foogd_module(features_norm)
+            else:
+                # 如果没有 FOOGD，使用特征范数
+                scores = torch.norm(features, dim=1)
+
+            all_scores.extend(scores.cpu().numpy())
+
+    return np.array(all_scores)
+
+
+def compute_detection_error(labels, scores):
+    """
+    计算检测错误率
+
+    Args:
+        labels: 真实标签
+        scores: OOD分数
+
+    Returns:
+        detection_error: 检测错误率
+    """
+    # 找到最优阈值
+    fpr, tpr, thresholds = roc_curve(labels, scores)
+    fnr = 1 - tpr
+    detection_errors = (fpr + fnr) / 2
+    min_error_idx = np.argmin(detection_errors)
+
+    return detection_errors[min_error_idx]
+
+
+def plot_ood_detection_results(id_scores, ood_scores, output_path):
+    """
+    绘制OOD检测结果
+
+    Args:
+        id_scores: ID样本的OOD分数
+        ood_scores: OOD样本的OOD分数
+        output_path: 输出路径
+    """
+    plt.figure(figsize=(15, 5))
+
+    # 分数分布
+    plt.subplot(1, 3, 1)
+    plt.hist(id_scores, bins=50, alpha=0.7, label='ID', density=True)
+    plt.hist(ood_scores, bins=50, alpha=0.7, label='OOD', density=True)
+    plt.xlabel('OOD Score')
+    plt.ylabel('Density')
+    plt.legend()
+    plt.title('OOD Score Distribution')
+
+    # ROC曲线
+    plt.subplot(1, 3, 2)
+    scores = np.concatenate([id_scores, ood_scores])
+    labels = np.concatenate([np.zeros_like(id_scores), np.ones_like(ood_scores)])
+
+    fpr, tpr, _ = roc_curve(labels, scores)
+    auroc = roc_auc_score(labels, scores)
+
+    plt.plot(fpr, tpr, 'b-', label=f'AUROC = {auroc:.4f}')
+    plt.plot([0, 1], [0, 1], 'r--', label='Random Classifier')
+    plt.xlabel('False Positive Rate (FPR)')
+    plt.ylabel('True Positive Rate (TPR)')
+    plt.legend()
+    plt.title('ROC Curve')
+
+    # Precision-Recall曲线
+    plt.subplot(1, 3, 3)
+    precision, recall, _ = precision_recall_curve(labels, scores)
+    aupr = average_precision_score(labels, scores)
+
+    plt.plot(recall, precision, 'g-', label=f'AUPR = {aupr:.4f}')
+    plt.xlabel('Recall')
+    plt.ylabel('Precision')
+    plt.legend()
+    plt.title('Precision-Recall Curve')
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+
+
+def plot_long_tail_performance(class_accs, class_sample_counts, class_names, output_path):
+    """
+    绘制长尾分布性能图
+    class_accs: dict, {class_id: accuracy}
+    class_sample_counts: dict, {class_id: sample_count}
+    """
+    # 1. 整理数据并排序
+    data = []
+    for cid in class_accs:
+        data.append({
+            'id': cid,
+            'name': class_names[cid],
+            'acc': class_accs[cid],
+            'count': class_sample_counts.get(cid, 0)
+        })
+
+    # 按样本数从大到小排序 (Head -> Tail)
+    data.sort(key=lambda x: x['count'], reverse=True)
+
+    sorted_names = [x['name'] for x in data]
+    sorted_accs = [x['acc'] for x in data]
+    sorted_counts = [x['count'] for x in data]
+    indices = np.arange(len(data))
+
+    fig, ax1 = plt.subplots(figsize=(15, 6))
+
+    # 2. 绘制样本数量 (背景柱状图) -以此展示长尾分布
+    color = 'tab:gray'
+    ax1.set_xlabel('Classes (Sorted by Sample Frequency)', fontsize=12)
+    ax1.set_ylabel('Number of Samples (Log Scale)', color=color, fontsize=12)
+    ax1.bar(indices, sorted_counts, color=color, alpha=0.3, label='Sample Count')
+    ax1.tick_params(axis='y', labelcolor=color)
+    ax1.set_yscale('log') # 长尾通常用对数坐标好看
+
+    # 3. 绘制准确率 (折线图)
+    ax2 = ax1.twinx()  # 共享X轴
+    color = 'tab:blue'
+    ax2.set_ylabel('Test Accuracy', color=color, fontsize=12)
+    ax2.plot(indices, sorted_accs, color=color, marker='o', linewidth=2, markersize=4, label='Accuracy')
+    ax2.tick_params(axis='y', labelcolor=color)
+    ax2.set_ylim(0, 1.05)
+
+    # 添加 Head/Tail 分界线
+    mid_point = int(len(data) * 0.5)
+    ax1.axvline(x=mid_point, color='red', linestyle='--', alpha=0.5)
+    ax1.text(mid_point+1, 0.1, 'Tail Classes ->', color='red', fontsize=12)
+    ax1.text(mid_point-5, 0.1, '<- Head Classes', color='red', fontsize=12)
+
+    ax1.set_title('Class-wise Performance over Long-tailed Distribution', fontsize=14)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300)
+    plt.close()
+
+
+def generate_evaluation_report(model, foogd_module, test_loader, near_ood_loader,
+                              far_ood_loader, device, output_dir):
+    """
+    生成完整的评估报告
+
+    Args:
+        model: 模型
+        foogd_module: FOOGD模块
+        test_loader: 测试数据加载器
+        near_ood_loader: Near-OOD数据加载器
+        far_ood_loader: Far-OOD数据加载器
+        device: 设备
+        output_dir: 输出目录
+        (Note: FedAvg架构使用单一分类器的特征进行OOD检测)
+
+    Returns:
+        report: 评估报告字典
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    report = {}
+
+    # 1. ID分类性能评估
+    print("评估ID分类性能...")
+    id_metrics = evaluate_id_performance(model, test_loader, device)
+    report['id_classification'] = id_metrics
+
+    # 绘制长尾分布性能图
+    plot_long_tail_performance(
+        id_metrics['class_accuracy'],
+        id_metrics['class_sample_counts'],
+        [f'Class_{i}' for i in range(54)],
+        os.path.join(output_dir, 'long_tail_performance.png')
+    )
+
+    # 2. Near-OOD检测评估
+    print("评估Near-OOD检测性能...")
+    if near_ood_loader is not None:
+        near_ood_metrics = evaluate_ood_detection(
+            model, foogd_module, test_loader, near_ood_loader, device, use_head_g
+        )
+        report['near_ood_detection'] = near_ood_metrics
+
+        plot_ood_detection_results(
+            near_ood_metrics['id_scores'],
+            near_ood_metrics['ood_scores'],
+            os.path.join(output_dir, 'near_ood_detection.png')
+        )
+
+    # 3. Far-OOD检测评估
+    print("评估Far-OOD检测性能...")
+    if far_ood_loader is not None:
+        far_ood_metrics = evaluate_ood_detection(
+            model, foogd_module, test_loader, far_ood_loader, device, use_head_g
+        )
+        report['far_ood_detection'] = far_ood_metrics
+
+        plot_ood_detection_results(
+            far_ood_metrics['id_scores'],
+            far_ood_metrics['ood_scores'],
+            os.path.join(output_dir, 'far_ood_detection.png')
+        )
+
+    # 保存报告
+    report_path = os.path.join(output_dir, 'evaluation_report.json')
+    with open(report_path, 'w') as f:
+        import json
+        # 转换numpy数组为列表
+        serializable_report = {}
+        for key, value in report.items():
+            if isinstance(value, dict):
+                serializable_report[key] = {}
+                for sub_key, sub_value in value.items():
+                    if isinstance(sub_value, np.ndarray):
+                        serializable_report[key][sub_key] = sub_value.tolist()
+                    else:
+                        serializable_report[key][sub_key] = sub_value
+            else:
+                serializable_report[key] = value
+
+        json.dump(serializable_report, f, indent=2)
+
+    print(f"评估报告已保存: {report_path}")
+
+    return report
+
+
+if __name__ == "__main__":
+    # 测试评估工具
+    print("测试评估工具...")
+
+    # 创建虚拟数据
+    id_scores = np.random.normal(0.5, 0.2, 1000)
+    ood_scores = np.random.normal(0.8, 0.3, 1000)
+
+    # 测试绘图函数
+    plot_ood_detection_results(id_scores, ood_scores, "test_ood_detection.png")
+    print("OOD检测结果图已保存: test_ood_detection.png")
+
+    # 测试长尾分布性能图
+    class_accs = {i: np.random.uniform(0.3, 0.9) for i in range(10)}
+    class_sample_counts = {i: int(np.random.exponential(100)) for i in range(10)}
+    plot_long_tail_performance(
+        class_accs,
+        class_sample_counts,
+        [f'Class_{i}' for i in range(10)],
+        "test_long_tail_performance.png"
+    )
+    print("长尾分布性能图已保存: test_long_tail_performance.png")
+
+    print("评估工具测试完成!")

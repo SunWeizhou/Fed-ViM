@@ -6,6 +6,8 @@ __pycache__/
 
 # Data
 data/
+Plankton_OOD_Dataset/
+DYB-PlanktonNet/
 
 # Jupyter
 .ipynb_checkpoints/
@@ -14,3 +16,21 @@ data/
 .claude/
 .vscode/
 .idea/
+
+# Experiments output
+experiments/**/Plankton_OOD_Dataset/
+experiments/**/*.png
+experiments/**/*.jpg
+experiments/**/*.pth
+experiments/**/training_history.json
+experiments/**/config.json
+experiments/**/checkpoints/
+
+# Model checkpoints
+*.pth
+*.pt
+*.ckpt
+
+# Results
+results/
+outputs/

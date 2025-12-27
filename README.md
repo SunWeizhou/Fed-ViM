@@ -68,14 +68,41 @@ python fed_vim_cifar.py
 
 ```
 Fed-ViM/
-├── fed_vim_cifar.py          # 主训练脚本
-├── Untitled.ipynb            # Jupyter notebook 实验笔记
-├── Fed-ViM 技术方案.md       # 详细技术文档
+├── fed_vim_cifar.py          # CIFAR-10 单脚本快速验证版本
 ├── README.md                 # 本文件
-└── data/                     # 数据集目录
-    ├── cifar-10-batches-py/
-    └── SVHN/
+├── CLAUDE.md                 # 项目开发指南（供 Claude Code 使用）
+├── Fed-ViM 技术方案.md       # 详细技术文档
+├── data/                     # 数据集目录
+│   ├── cifar-10-batches-py/  # CIFAR-10 数据
+│   └── test_32x32.mat        # SVHN 测试数据
+└── experiments/              # 实验模块
+    └── plankton/             # 浮游生物数据集完整实现
+        ├── train_federated.py    # 主入口脚本
+        ├── client.py             # 客户端逻辑（待修改加入统计量计算）
+        ├── server.py             # 服务端逻辑（待修改加入 PCA 聚合）
+        ├── models.py             # DenseNet + FedRoD 双头结构
+        ├── data_utils.py         # 数据加载与 Dirichlet 划分
+        ├── eval_utils.py         # 评估报告生成
+        ├── split_dataset.py      # 数据集划分工具
+        ├── visualize_experiments.py  # 可视化脚本
+        ├── requirements.txt      # 依赖列表
+        └── utils/                # 辅助工具
+            ├── test_pipeline.py       # 环境验证
+            └── evaluate_head_p.py     # 头部性能评估
 ```
+
+### 模块说明
+
+#### fed_vim_cifar.py（快速原型）
+- **用途**: 快速验证 Fed-ViM 核心想法
+- **优势**: 单文件设计，易于调试和理解算法流程
+- **适用场景**: 算法验证、教学演示、快速迭代
+
+#### experiments/plankton/（论文级实现）
+- **用途**: 在真实复杂数据集上的完整实现
+- **优势**: 工业级代码结构、模块化设计、可扩展性强
+- **适用场景**: 论文实验、性能对比、生产部署
+- **数据集**: 浮游生物图像（26 类，OOD 场景）
 
 ## 核心算法
 
