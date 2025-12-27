@@ -8,9 +8,50 @@ Fed-ViM is a federated learning framework for Out-of-Distribution (OOD) detectio
 
 **Key Innovation**: Instead of sharing raw features, clients share only first and second-order statistics (mean and covariance), which are aggregated to compute a global principal subspace. This subspace is used to compute residual-based OOD scores.
 
+## Architecture Overview
+
+The repository contains **two independent implementations**:
+
+| Aspect | fed_vim_cifar.py | experiments/plankton/ |
+|--------|------------------|----------------------|
+| **Purpose** | Quick algorithm validation | Production experiments |
+| **Design** | Single-file prototype | Modular architecture |
+| **Dataset** | CIFAR-10 + SVHN | Plankton (26 classes) |
+| **Model** | SimpleCNN (128-dim) | DenseNet121/169 (1024/1664-dim) |
+| **Fed-ViM Status** | ✅ Fully implemented | ✅ Fully implemented |
+| **Use Case** | Understanding algorithm, debugging | Paper experiments, benchmarking |
+| **File Count** | 1 file | 8+ files (client, server, models, data, eval) |
+
+**Key Point**: Both implementations are **independently functional**. The CIFAR version is NOT a dependency for the plankton version.
+
 ## Running the Code
 
-### Main Experiment
+### Quick Reference
+
+**CIFAR-10 Quick Prototype** (from repository root):
+```bash
+python fed_vim_cifar.py
+```
+
+**Plankton Fed-ViM Training** (from experiments/plankton/):
+```bash
+cd experiments/plankton
+python train_federated.py --use_fedvim --data_root ../../Plankton_OOD_Dataset
+```
+
+**Plankton FOOGD Training** (generative OOD baseline):
+```bash
+cd experiments/plankton
+python train_federated.py --use_foogd --data_root ../../Plankton_OOD_Dataset
+```
+
+**Plankton Baseline** (no OOD module):
+```bash
+cd experiments/plankton
+python train_federated.py --data_root ../../Plankton_OOD_Dataset
+```
+
+### Main Experiment (CIFAR-10)
 ```bash
 python fed_vim_cifar.py > fed_vim_full_run.log 2>&1 &
 tail -f fed_vim_full_run.log
@@ -67,10 +108,11 @@ experiments/plankton/
 - Production deployment
 - Extending to new datasets
 
-**Key files to modify for Fed-ViM integration**:
-- [client.py](experiments/plankton/client.py): Add statistics computation in `train_step()`
-- [server.py](experiments/plankton/server.py): Add PCA aggregation logic in `aggregate()`
-- [models.py](experiments/plankton/models.py): Already has dual-head structure compatible with ViM
+**Fed-ViM Integration Status** ✅ **COMPLETED**
+- [client.py](experiments/plankton/client.py): ✅ Added `use_fedvim` parameter, GSA Loss computation, and `_compute_local_statistics()` method
+- [server.py](experiments/plankton/server.py): ✅ Added `update_global_subspace()` method for PCA aggregation
+- [models.py](experiments/plankton/models.py): ✅ Added `GSALoss` class
+- [train_federated.py](experiments/plankton/train_federated.py): ✅ Integrated Fed-ViM training loop with `--use_fedvim` flag
 
 ### Key Classes
 
@@ -142,6 +184,18 @@ Both ID (CIFAR-10) and OOD (SVHN) use the **same** normalization parameters (CIF
 **Problem**: Output buffering causes silent hanging
 **Solution**: Use direct `python fed_vim_cifar.py`
 
+### Dataset Not Found Error
+**Error**: `ValueError: num_samples should be a positive integer value, but got num_samples=0`
+**Cause**: Incorrect `--data_root` path
+**Solution**: Ensure dataset path points to `Plankton_OOD_Dataset`:
+```bash
+# From experiments/plankton/
+--data_root ../../Plankton_OOD_Dataset
+
+# Or use absolute path
+--data_root /home/dell7960/桌面/FedRoD/Fed-ViM/Plankton_OOD_Dataset
+```
+
 ### OOD Residual < ID Residual
 **Diagnosis**:
 ```python
@@ -150,15 +204,25 @@ if np.mean(ood_res) < np.mean(id_res):
     print("⚠️ WARNING: Subspace too large or features not learned")
 ```
 **Fixes**:
-1. Reduce subspace dimension (line 201: `k = 20`)
-2. Increase training rounds/epochs
-3. Check if model has converged (test accuracy > 60%)
+1. Reduce subspace dimension (line 201: `k = 20` for fed_vim_cifar.py)
+2. For plankton experiments, reduce k in `server.update_global_subspace()` call
+3. Increase training rounds/epochs
+4. Check if model has converged (test accuracy > 60%)
 
 ### Low AUROC (< 0.7)
 **Common causes**:
-1. Insufficient training (current: 50 rounds × 3 epochs)
+1. Insufficient training (current: 50 rounds × 3-4 epochs)
 2. Subspace dimension too large
-3. λ_gsa weight too small/large (current: 0.1)
+3. λ_gsa weight too small/large (current: 1.0 for plankton)
+4. Model not converged (check test accuracy)
+
+### Memory Issues During Training
+**Symptoms**: CUDA out of memory
+**Solutions**:
+1. Reduce `--batch_size` (default: 64, try 32 or 16)
+2. Reduce `--image_size` (default: 224, try 160)
+3. Use smaller model: `--model_type densenet121` instead of `densenet169`
+4. Reduce number of clients: `--num_clients 5` instead of 10
 
 ## Modifying the Framework
 
@@ -211,9 +275,13 @@ pip install -r requirements.txt
 ```
 
 2. **Prepare dataset**:
-The plankton dataset should be placed in the parent directory:
+The plankton dataset location is:
 ```
-../../Plankton_OOD_Dataset/
+/home/dell7960/桌面/FedRoD/Fed-ViM/Plankton_OOD_Dataset/
+```
+When running from `experiments/plankton/`, use:
+```bash
+--data_root ../../Plankton_OOD_Dataset
 ```
 
 3. **Verify environment**:
@@ -236,20 +304,39 @@ python train_federated.py \
     --rounds 50 \
     --local_epochs 3 \
     --lr 0.001 \
-    --gpu_id 0
+    --gpu_id 0 \
+    --data_root ../../Plankton_OOD_Dataset
+```
+
+**Fed-ViM Training** (with Global Subspace Alignment):
+```bash
+python train_federated.py \
+    --use_fedvim \
+    --alpha 0.1 \
+    --communication_rounds 50 \
+    --model_type densenet121 \
+    --batch_size 64 \
+    --image_size 320 \
+    --base_lr 0.01 \
+    --data_root ../../Plankton_OOD_Dataset \
+    --output_dir ./experiments_fedvim_dense121_320
 ```
 
 ### Key Hyperparameters in plankton/experiments
 
-- `--num_clients`: Number of federated clients (default: 5)
+- `--num_clients`: Number of federated clients (default: 10)
 - `--alpha`: Dirichlet concentration for Non-IID data
   - 0.1: Highly Non-IID
-  - 0.5: Moderate (current default)
-  - 1.0: IID
-- `--rounds`: Number of federated rounds (default: 50)
-- `--local_epochs`: Local training epochs per round (default: 3)
-- `--lr`: Learning rate (default: 0.001)
-- `--gpu_id`: GPU device ID (default: 0)
+  - 0.5: Moderate
+  - 1.0: IID (uniform distribution)
+- `--communication_rounds`: Number of federated rounds (default: 50)
+- `--local_epochs`: Local training epochs per round (default: 4)
+- `--base_lr`: Learning rate (default: 0.001)
+- `--model_type`: Backbone network - `densenet121` (1024-dim) or `densenet169` (1664-dim)
+- `--use_fedvim`: Enable Fed-ViM (GSA Loss + PCA subspace alignment)
+- `--use_foogd`: Enable FOOGD (generative OOD with score matching)
+- `--image_size`: Input image size (default: 224, recommended: 320)
+- `--data_root`: Path to Plankton_OOD_Dataset (default: `./Plankton_OOD_Dataset`)
 
 ### Expected Outputs
 
@@ -258,119 +345,109 @@ Training will generate:
 - Training logs: Console output with per-round metrics
 - Evaluation results: Saved in checkpoint directory
 
-## Integrating Fed-ViM into experiments/plankton
+## Fed-ViM Implementation Details (experiments/plankton)
 
-### Step 1: Modify client.py
+### Client-Side Changes ([client.py](experiments/plankton/client.py))
 
-Add statistics computation in the `train_step()` method:
+**Key Modifications**:
+1. **Constructor** (line 20-34): Added `use_fedvim` parameter and initializes `GSALoss` when enabled
+2. **train_step** (line 88-222):
+   - Accepts `global_stats` dict containing `P_global` and `mu_global`
+   - Computes GSA Loss on both original and augmented features (line 182-191)
+   - Returns `client_vim_stats` via `_compute_local_statistics()` (line 242-243)
+3. **_compute_local_statistics** (line 330-354): Memory-efficient statistics computation
+   ```python
+   sum_z += features.sum(dim=0)
+   sum_zzT += torch.matmul(features.T, features)  # Critical optimization!
+   ```
 
+**GSA Loss Computation** (line 182-191):
 ```python
-# In client.py, around line 100-150
-def train_step(self, batch, global_P, global_mu):
-    images, labels = batch
-    features = self.model.forward_features(images)  # Extract features
-
-    # ✅ NEW: Compute local statistics
-    with torch.no_grad():
-        batch_size = features.shape[0]
-        stat_sum_z = features.sum(dim=0)
-        stat_sum_zzT = torch.matmul(features.T, features)  # Memory-efficient!
-
-    # Existing training code...
-    logits = self.model.classifier(features)
-    loss = self.criterion(logits, labels)
-
-    # Compute ViM statistics
-    with torch.no_grad():
-        max_logit = logits.max(dim=1).values
-        residual = torch.matmul(torch.eye(features.shape[1]) - global_P @ global_P.T,
-                                (features - global_mu).T)
-        stat_sum_max_logit = max_logit.sum()
-        stat_sum_residual = residual.norm(dim=0).sum()
-
-    return loss, {
-        'stat_sum_z': stat_sum_z,
-        'stat_sum_zzT': stat_sum_zzT,
-        'stat_sum_max_logit': stat_sum_max_logit,
-        'stat_sum_residual': stat_sum_residual
-    }
+if self.use_fedvim and P_global is not None:
+    loss_clean = self.gsa_criterion(features, P_global, mu_global)
+    loss_aug = self.gsa_criterion(features_aug, P_global, mu_global)
+    gsa_loss = 0.5 * loss_clean + 0.5 * loss_aug  # Average over clean + aug
 ```
 
-### Step 2: Modify server.py
+### Server-Side Changes ([server.py](experiments/plankton/server.py))
 
-Add PCA aggregation in the `aggregate()` method:
-
+**Key Addition** - `update_global_subspace` method (line 98-153):
 ```python
-# In server.py, around line 80-120
-def aggregate(self, client_updates):
-    # Existing FedAvg for model weights
-    aggregated_weights = self._fedavg_weights(client_updates)
+def update_global_subspace(self, client_stats_list, k=64):
+    # 1. Aggregate sufficient statistics
+    total_count = sum([s['count'] for s in client_stats_list])
+    global_sum_z = sum(s['sum_z'] for s in client_stats_list)
+    global_sum_zzT = sum(s['sum_zzT'] for s in client_stats_list)
 
-    # ✅ NEW: Aggregate statistics
-    total_samples = sum(update['num_samples'] for update in client_updates)
+    # 2. Reconstruct global covariance
+    mu_global = global_sum_z / total_count
+    E_zzT = global_sum_zzT / total_count
+    cov_global = E_zzT - torch.outer(mu_global, mu_global)
 
-    # Aggregate first-order statistics (mean)
-    mu_global = sum(update['stats']['stat_sum_z'] * update['num_samples']
-                    for update in client_updates) / total_samples
+    # 3. Eigendecomposition
+    eig_vals, eig_vecs = torch.linalg.eigh(cov_global)
+    self.P_global = eig_vecs[:, -k:]  # Top-k eigenvectors
 
-    # Aggregate second-order statistics (covariance)
-    E_zzT = sum(update['stats']['stat_sum_zzT'] * update['num_samples']
-                for update in client_updates) / total_samples
-    Cov_global = E_zzT - torch.outer(mu_global, mu_global)
-
-    # Perform PCA to extract subspace
-    eig_vals, eig_vecs = torch.linalg.eigh(Cov_global)
-    k = 20  # Subspace dimension
-    P_global = eig_vecs[:, -k:]  # Top-k eigenvectors
-
-    # Compute α coefficient for ViM
-    total_max_logit = sum(update['stats']['stat_sum_max_logit']
-                          for update in client_updates)
-    total_residual = sum(update['stats']['stat_sum_residual']
-                         for update in client_updates)
-    alpha = total_max_logit / total_residual
-
-    return {
-        'weights': aggregated_weights,
-        'P_global': P_global,
-        'mu_global': mu_global,
-        'alpha': alpha
-    }
+    return {'P': self.P_global, 'mu': self.mu_global}
 ```
 
-### Step 3: Update train_federated.py
+### Training Loop Integration ([train_federated.py](experiments/plankton/train_federated.py))
 
-Modify the training loop to pass global statistics to clients and receive their statistics back:
+**Key Changes**:
+1. **Initialize global statistics** (line 331):
+   ```python
+   global_vim_stats = {'P': None, 'mu': None}
+   ```
 
+2. **Client training with statistics** (line 356-368):
+   ```python
+   client_update, client_loss, client_stats = client.train_step(
+       local_epochs=args.local_epochs,
+       current_round=round_num,
+       global_stats=global_vim_stats  # Broadcast P, mu to clients
+   )
+   if args.use_fedvim and client_stats is not None:
+       client_vim_stats_list.append(client_stats)
+   ```
+
+3. **Server subspace update** (line 380-383):
+   ```python
+   if args.use_fedvim and len(client_vim_stats_list) > 0:
+       global_vim_stats = server.update_global_subspace(client_vim_stats_list, k=64)
+   ```
+
+### GSA Loss Implementation ([models.py](experiments/plankton/models.py))
+
+The `GSALoss` class (line 101-134) computes the residual norm outside the global subspace:
 ```python
-# In train_federated.py, main training loop
-for round_idx in range(args.rounds):
-    # Server broadcasts global model + statistics
-    global_state = {
-        'model': server.global_model,
-        'P': server.global_P,
-        'mu': server.global_mu
-    }
+def forward(self, features, P_global, mu_global):
+    P = P_global.detach()  # Block gradient flow to global parameters
+    mu = mu_global.detach()
 
-    client_updates = []
-    for client in clients:
-        # Client trains with global statistics
-        update = client.train(global_state)
-        client_updates.append(update)
+    z_centered = features - mu
+    z_projected_coeffs = torch.matmul(z_centered, P)
+    z_reconstructed = torch.matmul(z_projected_coeffs, P.T)
 
-    # Server aggregates weights + statistics
-    aggregated = server.aggregate(client_updates)
-    server.update_global_state(aggregated)
+    diff = z_centered - z_reconstructed
+    loss = torch.norm(diff, p=2, dim=1).mean()  # Residual norm
+    return loss
 ```
 
-## Migration Checklist
+### Critical Design Decisions
 
-When migrating Fed-ViM from `fed_vim_cifar.py` to `experiments/plankton/`:
+1. **Subspace Dimension**: k=64 for DenseNet (1024-1664 feature dimensions)
+   - Higher k → more discriminative power but weaker OOD separation
+   - Lower k → stricter subspace constraint → larger OOD residuals
 
-- [ ] Add GSALoss class to [models.py](experiments/plankton/models.py)
-- [ ] Modify [client.py](experiments/plankton/client.py) to compute local statistics
-- [ ] Modify [server.py](experiments/plankton/server.py) to perform PCA aggregation
-- [ ] Update [train_federated.py](experiments/plankton/train_federated.py) main loop
-- [ ] Test on small dataset (e.g., 1 round, 2 clients)
-- [ ] Verify OOD detection performance
-- [ ] Compare with baseline results
+2. **GSA Loss Weight**: λ_gsa = 1.0 (client.py line 194)
+   - Balances classification accuracy vs. subspace alignment
+
+3. **Gradient Detachment**: Essential to prevent backpropagation to global P and μ
+   - Applied in GSALoss.forward() using `.detach()`
+
+4. **First Round Handling**: GSA Loss is skipped when P_global is None (first round)
+   - Allows model to learn initial features before subspace constraint
+
+5. **Augmentation Strategy**: GSA Loss applied to both clean and Fourier-augmented features
+   - Improves robustness to style variations
+   - Equal weighting (0.5 each)
